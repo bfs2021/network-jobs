@@ -287,7 +287,8 @@ If the installed version is **below** the floor:
 2. Do **not** run `npm i -g` yourself mid-run, and do **not** retry the same failing
    command twice. A version-floor miss is a user action, not something to work around.
 3. Fall back to the user-capture path (save the page, `paginate --input`) or stop.
-   Put the version in the fetch-log `notes` so the next run does not re-derive it.
+   Record the version in the fetch-log `agentBrowserVersion` field so the next run
+   does not re-derive it.
 
 `network-jobs doctor` prints `WARN agent-browser X < Y` for this case, and
 `network-jobs update` upgrades only when below the floor — never just because a

@@ -785,13 +785,14 @@ cmd_doctor() {
     fi
   done
   if command -v agent-browser >/dev/null 2>&1; then
-    local ab_have ab_min
+    local ab_have ab_min ab_desc
     ab_have="$(ab_installed_version || true)"
     ab_min="$(ab_min_version "$ROOT/package.json" || true)"
-    if [[ -n "$ab_have" && -n "$ab_min" ]] && ! ab_version_ge "$ab_have" "$ab_min"; then
-      echo "WARN agent-browser $ab_have < $ab_min — network-jobs update   (or: npm i -g agent-browser@latest)"
+    ab_desc="$(ab_describe_version "$ab_have" "$ab_min")"
+    if [[ "$ab_desc" == *" < "* ]]; then
+      echo "WARN agent-browser $ab_desc — network-jobs update   (or: npm i -g agent-browser@latest)"
     else
-      echo "OK  agent-browser ${ab_have:-}"
+      echo "OK  agent-browser ${ab_desc}"
     fi
   elif [[ -f "$DATA_HOME/config/no-browser" ]]; then
     echo "OK  agent-browser skipped (setup --no-browser)"

@@ -275,11 +275,16 @@ Verbatim capture of each fetch/browser snapshot **before** presenting results to
   "url": "https://example.com/careers",
   "status": 200,
   "disposition": "staged",
+  "agentBrowserVersion": "0.39.1",
   "notes": ""
 }
 ```
 
 For a gated board, the user-capture handoff writes one entry with `"method": "user-capture"`, `"disposition": "user-capture"`, the careers URL the user opened, and `capturePath` pointing at the saved file under `triage/<dir>/captures/`. Ingest that file with `paginate --input <file>` — the rest of the pipeline is unchanged.
+
+`agentBrowserVersion` is optional and set only for `method: agent-browser`: the
+output of `agent-browser --version`, so a later run can tell a site change from
+a tool change. Omit it when unknown rather than guessing.
 
 ## Corpus (jobs-ingest output)
 

@@ -22,7 +22,7 @@ npm i -g @hirefrank/network-jobs@latest
 network-jobs setup --agent auto
 ```
 
-This creates `~/.network-jobs/`, installs `agent-browser` when missing, puts `network-jobs` on PATH (`~/.local/bin`), and symlinks all six skills into each detected agent’s skills directory.
+This creates `~/.network-jobs/`, installs `agent-browser` when missing (and upgrades it when it is below the floor declared in `package.json`), puts `network-jobs` on PATH (`~/.local/bin`), and symlinks all six skills into each detected agent’s skills directory.
 
 Zero-install try (no global install):
 
@@ -47,6 +47,13 @@ network-jobs doctor
 ```
 
 Requires: `curl`, `jq`, `unzip`, `python3`, and a working `npm` (for [`agent-browser`](https://github.com/vercel-labs/agent-browser)). Optional: `pdftotext` for PDF resume extraction.
+
+`agent-browser` is only needed for JavaScript-rendered career pages — skip it with
+`setup --no-browser` and static boards still work. `network-jobs doctor` prints the
+installed version and warns when it is below `agentBrowser.minVersion` in
+`package.json`; `network-jobs update` upgrades only below that floor. See
+[`skills/careers-discover/references/agent-browser.md`](skills/careers-discover/references/agent-browser.md)
+for the command reference (subcommands are grouped: `network har`, not `har`).
 
 Optional alternate skill placement: `npx skills add hirefrank/network-jobs -g -a …` then still run `network-jobs setup` for data + launcher.
 
