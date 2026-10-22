@@ -132,6 +132,40 @@ network_jobs_is_packaged_install() {
   esac
 }
 
+# Where the `network-jobs` launcher may live, in preference order. One list so
+# `setup` (which writes it) and `reset` (which tells the user to remove it)
+# cannot drift apart.
+network_jobs_launcher_candidates() {
+  printf '%s\n' "$HOME/.local/bin" "$HOME/bin"
+}
+
+# The directory `setup` would install into: first candidate already on PATH,
+# else the first candidate (matches the historical ~/.local/bin default).
+network_jobs_launcher_dir() {
+  local candidate
+  while IFS= read -r candidate; do
+    case ":$PATH:" in
+      *":$candidate:"*) printf '%s\n' "$candidate"; return 0 ;;
+    esac
+  done < <(network_jobs_launcher_candidates)
+  network_jobs_launcher_candidates | head -n1
+}
+
+# Existing launcher scripts, checked across every candidate directory (PATH may
+# have changed since install). Only setup's own launcher counts: it carries a
+# "# network-jobs launcher" marker and is a regular file, so an npm `.bin`
+# symlink or the user's own wrapper is never offered up for deletion.
+network_jobs_launcher_paths() {
+  local dir path
+  while IFS= read -r dir; do
+    path="$dir/network-jobs"
+    if [[ -f "$path" && ! -L "$path" ]] && grep -q "network-jobs launcher" "$path" 2>/dev/null; then
+      printf '%s\n' "$path"
+    fi
+  done < <(network_jobs_launcher_candidates)
+  return 0
+}
+
 # Print the top-level cache entry directory holding a nested package path.
 network_jobs__cache_entry_root() {
   local base="$1" nested="$2" rest

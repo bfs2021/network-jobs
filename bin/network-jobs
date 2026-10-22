@@ -90,7 +90,7 @@ Commands:
       Remove installed skill links (keeps ~/.network-jobs unless --data)
 
   uninstall [--agent auto|all|name,...] [--purge-cache] [--yes]
-      Full wipe: skills + ~/.network-jobs (same as reset --data)
+      Remove skill links + ~/.network-jobs (keeps the CLI itself installed)
 
   agents
       List supported agents and detection status
@@ -465,6 +465,10 @@ Usage: network-jobs reset [options]
 
 Remove installed skill links from agent skill directories.
 
+The npm package and the ~/.local/bin launcher stay installed. When a reset
+finishes, the two commands that remove them are printed — they are never run
+for you, because a CLI cannot safely uninstall the package it is running from.
+
 Options:
   --agent <list>   Target agents: auto (default), all, or claude-code,cursor,…
   --data           Also delete ~/.network-jobs (connections, corpus, profile)
@@ -697,6 +701,54 @@ cmd_reset() {
   else
     echo "Re-link skills: network-jobs setup --agent auto"
   fi
+  if [[ "$wipe_data" -eq 1 ]]; then
+    print_cli_removal_hint "$purge_cache"
+  fi
+}
+
+# Print — never run — the steps that remove the CLI itself.
+#
+# reset owns skill links and the data dir only. The npm package and the
+# ~/.local/bin launcher survive it, and the launcher falls back to
+# `npx …@latest`, so leaving it in place means the next invocation silently
+# re-fetches the suite. A CLI also cannot reliably uninstall the package it is
+# executing from (npm may be a version-manager shim, and the prefix is unknown),
+# so the honest thing is to hand the user the exact commands.
+print_cli_removal_hint() {
+  local purge_cache="${1:-0}"
+  local launcher
+
+  echo
+  echo "The CLI itself is still installed — this removed skill links and data, not the command."
+  echo "To remove it:"
+  if [[ "$purge_cache" -ne 1 ]]; then
+    if network_jobs_is_packaged_install "$ROOT" && ! network_jobs_is_npm_global_install "$ROOT"; then
+      # This copy IS the cache entry (npx/pnpm). Invoking the launcher here would
+      # re-fetch @latest and repopulate what we are asking the user to purge, so
+      # name the directory instead.
+      printf '  rm -rf %q    # this cached copy of the suite\n' "$ROOT"
+    elif [[ -x "$ROOT/bin/network-jobs" ]]; then
+      # Resolved path, never `network-jobs` — that may be the launcher, which
+      # falls back to `npx @latest` now that suite-root is gone.
+      printf '  %q reset --yes --purge-cache    # clear cached npx/pnpm copies first\n' "$ROOT/bin/network-jobs"
+    fi
+  fi
+  if network_jobs_is_npm_global_install "$ROOT"; then
+    if command -v npm >/dev/null 2>&1 && npm --version >/dev/null 2>&1; then
+      echo "  npm uninstall -g @hirefrank/network-jobs"
+    else
+      # npm is often a version-manager shim that fails with no global runtime
+      # selected; say so rather than printing a command that will not resolve.
+      echo "  npm uninstall -g @hirefrank/network-jobs    # after fixing npm on PATH"
+    fi
+  elif network_jobs_is_packaged_install "$ROOT"; then
+    echo "  # this copy is not an npm-global install — nothing global to remove"
+  else
+    echo "  # running from a source checkout — delete the clone when you are done"
+  fi
+  while IFS= read -r launcher; do
+    printf '  rm -f %q\n' "$launcher"
+  done < <(network_jobs_launcher_paths)
 }
 
 cmd_update() {
