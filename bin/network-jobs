@@ -90,7 +90,7 @@ Commands:
       Remove installed skill links (keeps ~/.network-jobs unless --data)
 
   uninstall [--agent auto|all|name,...] [--purge-cache] [--yes]
-      Full wipe: skills + ~/.network-jobs (same as reset --data)
+      Remove skill links + ~/.network-jobs (keeps the CLI itself installed)
 
   agents
       List supported agents and detection status
@@ -465,6 +465,10 @@ Usage: network-jobs reset [options]
 
 Remove installed skill links from agent skill directories.
 
+The npm package and the ~/.local/bin launcher stay installed. When a reset
+finishes, the two commands that remove them are printed — they are never run
+for you, because a CLI cannot safely uninstall the package it is running from.
+
 Options:
   --agent <list>   Target agents: auto (default), all, or claude-code,cursor,…
   --data           Also delete ~/.network-jobs (connections, corpus, profile)
@@ -696,6 +700,43 @@ cmd_reset() {
     echo "Reinstall: npm i -g @hirefrank/network-jobs@latest && network-jobs setup --agent auto"
   else
     echo "Re-link skills: network-jobs setup --agent auto"
+  fi
+  print_cli_removal_hint "$purge_cache"
+}
+
+# Print — never run — the steps that remove the CLI itself.
+#
+# reset owns skill links and the data dir only. The npm package and the
+# ~/.local/bin launcher survive it, and the launcher falls back to
+# `npx …@latest`, so leaving it in place means the next invocation silently
+# re-fetches the suite. A CLI also cannot reliably uninstall the package it is
+# executing from (npm may be a version-manager shim, and the prefix is unknown),
+# so the honest thing is to hand the user the exact commands.
+print_cli_removal_hint() {
+  local purge_cache="${1:-0}"
+  local launcher="$HOME/.local/bin/network-jobs"
+
+  echo
+  echo "The CLI itself is still installed — reset removes skill links and data, not the command."
+  echo "To remove it:"
+  if [[ "$purge_cache" -ne 1 ]]; then
+    echo "  network-jobs reset --yes --purge-cache    # clear cached npx/pnpm copies first"
+  fi
+  if network_jobs_is_npm_global_install "$ROOT"; then
+    if command -v npm >/dev/null 2>&1 && npm --version >/dev/null 2>&1; then
+      echo "  npm uninstall -g @hirefrank/network-jobs"
+    else
+      # npm is often a version-manager shim that fails with no global runtime
+      # selected; say so rather than printing a command that will not resolve.
+      echo "  npm uninstall -g @hirefrank/network-jobs    # after fixing npm on PATH"
+    fi
+  elif network_jobs_is_packaged_install "$ROOT"; then
+    echo "  # this copy is not an npm-global install — nothing global to remove"
+  else
+    echo "  # running from a source checkout — delete the clone when you are done"
+  fi
+  if [[ -e "$launcher" || -L "$launcher" ]]; then
+    echo "  rm -f $launcher"
   fi
 }
 

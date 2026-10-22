@@ -3,6 +3,17 @@
 ## Unreleased
 
 ### Fixed
+- `reset` / `uninstall` now print the two commands that actually remove the
+  CLI (`npm uninstall -g @hirefrank/network-jobs`, `rm -f ~/.local/bin/network-jobs`)
+  instead of implying a full wipe. `uninstall` was described as "Full wipe" but
+  only removed skill links and `~/.network-jobs`; the npm package and the
+  launcher survived, and because the launcher falls back to
+  `npx @hirefrank/network-jobs@latest`, the next invocation silently re-fetched
+  the suite. The hint is printed, never executed — a CLI cannot safely
+  uninstall the package it is running from — and is tailored: it suggests
+  `npm uninstall` only for an npm-global install, prints the launcher line only
+  when the launcher exists, and omits the `--purge-cache` suggestion when that
+  flag was already passed.
 - `index/matches.json` no longer flips between the SCHEMA object and a bare
   array depending on the last writer (#32). `fetch-descriptions` now writes
   the object back — wrapper and summary keys preserved — instead of
