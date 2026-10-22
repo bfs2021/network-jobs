@@ -1443,6 +1443,27 @@ cmd_which() {
   fi
   echo "suite=$ROOT"
   echo "data=$DATA_HOME"
+
+  # Never report a suite that cannot run. The launcher refuses a recorded-but-
+  # missing suite, and `which` must agree rather than print a dead path as if
+  # it were the code about to execute.
+  if [[ ! -x "$ROOT/bin/network-jobs" ]]; then
+    echo "error: this copy cannot run: $ROOT/bin/network-jobs is missing" >&2
+    return 1
+  fi
+  local recorded=""
+  if [[ -f "$DATA_HOME/suite-root" ]]; then
+    recorded="$(cat "$DATA_HOME/suite-root" 2>/dev/null || true)"
+  fi
+  if [[ -n "$recorded" && "$recorded" != "$ROOT" ]]; then
+    if [[ -x "$recorded/bin/network-jobs" ]]; then
+      echo "recorded=$recorded (setup's suite-root, not this copy)"
+    else
+      echo "error: suite-root points at a missing suite: $recorded" >&2
+      echo "Re-run setup, or empty $DATA_HOME/suite-root to use the registry build." >&2
+      return 1
+    fi
+  fi
 }
 
 # Day-to-day commands delegate to the Python lib CLI (network_jobs.cli).

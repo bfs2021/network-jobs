@@ -281,17 +281,27 @@ if [[ "$INSTALL_LAUNCHER" -eq 1 ]]; then
     cat > "$launcher_dir/network-jobs" <<'LAUNCHER'
 #!/usr/bin/env bash
 # network-jobs launcher — resolves the installed suite, falls back to a
-# fresh fetch from GitHub if that copy was garbage collected.
+# fresh fetch from GitHub only when no suite has been recorded yet.
 set -euo pipefail
 data="${NETWORK_JOBS_HOME:-$HOME/.network-jobs}"
 root="$(cat "$data/suite-root" 2>/dev/null || true)"
-if [[ -n "$root" && -x "$root/bin/network-jobs" ]]; then
-  exec "$root/bin/network-jobs" "$@"
+# Two different states, two different answers. A recorded suite that is gone is
+# a broken install, not a first run: substituting the registry build would run
+# different code than the user installed, with the same --version output.
+if [[ -n "$root" ]]; then
+  if [[ -x "$root/bin/network-jobs" ]]; then
+    exec "$root/bin/network-jobs" "$@"
+  fi
+  echo "network-jobs: installed suite is gone: $root" >&2
+  echo "Re-run setup, or empty $data/suite-root to use the registry build." >&2
+  exit 1
 fi
 if command -v pnpm >/dev/null 2>&1 && pnpm --version >/dev/null 2>&1; then
+  echo "network-jobs: no suite-root recorded — running registry build (@hirefrank/network-jobs@latest) via pnpm dlx" >&2
   exec pnpm dlx '@hirefrank/network-jobs@latest' "$@"
 fi
 if command -v npx >/dev/null 2>&1 && npx --version >/dev/null 2>&1; then
+  echo "network-jobs: no suite-root recorded — running registry build (@hirefrank/network-jobs@latest) via npx" >&2
   exec npx --yes '@hirefrank/network-jobs@latest' "$@"
 fi
 echo "network-jobs: suite not found and no pnpm/npx available" >&2

@@ -3974,6 +3974,115 @@ class SetupNextStepsTests(unittest.TestCase):
                          proc.stdout)
 
 
+class SetupLauncherSuiteRootTests(unittest.TestCase):
+    """#52: a recorded-but-missing suite must fail loudly, not run the registry.
+
+    The launcher collapsed "no suite-root recorded" and "suite-root points at a
+    deleted install" into one branch, so a stale install silently executed
+    `pnpm dlx` / `npx @latest` — same version string, different code. These run
+    the generated launcher by absolute path under a temp HOME, with stub
+    runners, so nothing real is fetched or overwritten.
+    """
+
+    def _setup(self, tmp: Path):
+        import subprocess
+
+        home = tmp / "home"
+        home.mkdir()
+        fakebin = tmp / "bin"
+        fakebin.mkdir()
+        marker = tmp / "runner-called"
+        for runner in ("pnpm", "npx"):
+            stub = fakebin / runner
+            stub.write_text("#!/usr/bin/env bash\n"
+                            f'printf "%s\\n" "$*" >> {marker}\n'
+                            "exit 0\n")
+            stub.chmod(0o755)
+        env = dict(os.environ)
+        env.update({"HOME": str(home),
+                    "NETWORK_JOBS_HOME": str(home / "data"),
+                    "PATH": f"{fakebin}:/usr/bin:/bin"})
+        proc = subprocess.run(
+            ["bash", f"{ROOT}/setup", "--agent", "claude-code", "--no-browser"],
+            capture_output=True, text=True, env=env, timeout=180)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return home, fakebin, marker, proc.stdout
+
+    def _run_launcher(self, home: Path, fakebin: Path, *args: str):
+        import subprocess
+
+        env = dict(os.environ)
+        env.update({"HOME": str(home),
+                    "NETWORK_JOBS_HOME": str(home / "data"),
+                    "PATH": f"{fakebin}:/usr/bin:/bin"})
+        launcher = home / ".local" / "bin" / "network-jobs"
+        self.assertTrue(launcher.exists(), "setup did not write the launcher")
+        return subprocess.run([str(launcher), *args], capture_output=True,
+                              text=True, env=env, timeout=60)
+
+    def test_dangling_suite_root_fails_instead_of_running_registry_build(self):
+        tmp = Path(tempfile.mkdtemp(prefix="nj-launcher-dangling-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        home, fakebin, marker, _ = self._setup(tmp)
+        dead = tmp / "gone-suite"
+        (home / "data" / "suite-root").write_text(f"{dead}\n")
+
+        proc = self._run_launcher(home, fakebin, "--version")
+
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn(str(dead), proc.stderr)
+        self.assertIn("Re-run setup", proc.stderr)
+        # No package runner may have been reached.
+        self.assertFalse(marker.exists(), marker.read_text() if marker.exists() else "")
+
+    def test_absent_suite_root_falls_back_to_the_runner(self):
+        tmp = Path(tempfile.mkdtemp(prefix="nj-launcher-fallback-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        home, fakebin, marker, _ = self._setup(tmp)
+        # setup always records its suite; "absent" is the first-run / cleared case.
+        (home / "data" / "suite-root").unlink()
+
+        proc = self._run_launcher(home, fakebin, "--version")
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertTrue(marker.exists(), proc.stderr)
+        self.assertIn("@hirefrank/network-jobs@latest", marker.read_text())
+        # The fallback is announced, not silent.
+        self.assertIn("no suite-root recorded", proc.stderr)
+        self.assertIn("registry build", proc.stderr)
+
+    def test_which_refuses_a_recorded_suite_that_cannot_run(self):
+        import subprocess
+
+        tmp = Path(tempfile.mkdtemp(prefix="nj-which-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        data = tmp / "data"
+        data.mkdir()
+        dead = tmp / "gone-suite"
+        (data / "suite-root").write_text(f"{dead}\n")
+        env = dict(os.environ)
+        env.update({"NETWORK_JOBS_HOME": str(data), "HOME": str(tmp / "home")})
+
+        proc = subprocess.run(
+            ["bash", str(ROOT / "bin" / "network-jobs"), "which"],
+            capture_output=True, text=True, env=env, timeout=60)
+
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn(str(dead), proc.stderr)
+        self.assertIn("missing suite", proc.stderr)
+
+    def test_setup_offers_embeddings_with_value_and_cost(self):
+        tmp = Path(tempfile.mkdtemp(prefix="nj-setup-embed-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        _, _, _, stdout = self._setup(tmp)
+
+        self.assertIn("Optional:", stdout)
+        self.assertIn("embed-setup", stdout)
+        self.assertIn("Semantic resume<->job matching", stdout)
+        self.assertIn("60MB", stdout)
+        self.assertIn("Keyword scoring works without it", stdout)
+
+
 class InventoryPipelineTests(unittest.TestCase):
     """#33: the INVENTORY header is owned by the helpers, not by the model."""
 
