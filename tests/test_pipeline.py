@@ -2255,6 +2255,101 @@ class CategoryAffinityTests(unittest.TestCase):
         self.assertFalse(scored["matched"])
 
 
+class CategoryConfidenceTests(unittest.TestCase):
+    """#40: a low-confidence category guess must not score as confirmed.
+
+    The exact-category branch used to award +5 without consulting
+    `categoryConfidence`, while the affinity branch two lines below required
+    `high`. Both now go through `category_confirmed`.
+    """
+
+    def test_high_confidence_exact_match_keeps_bonus(self):
+        job = {"title": "Senior Product Manager", "company": "Acme",
+               "location": "Remote"}
+        scored = score_job(job, {"categories": ["product"]})
+        self.assertEqual(scored["category"], "product")
+        self.assertEqual(scored["categoryConfidence"], "high")
+        self.assertIn("category", scored["matchReasons"])
+        self.assertNotIn("category-unconfirmed", scored["matchReasons"])
+        # The +5 is the only difference from scoring without category prefs.
+        baseline = score_job(job, {})
+        self.assertEqual(scored["matchScore"] - baseline["matchScore"], 5)
+
+    def test_low_confidence_exact_match_gets_no_bonus(self):
+        # "Data Steward" lands in `data` on the weak "data" token, i.e.
+        # exactly the low-confidence guess #40 is about. Deliberately not a
+        # "product" title: #37 removes the weak `product` token, so a
+        # "Product Analyst" fixture would classify `other`/low once both
+        # branches merge. This one stays `data`/low either way.
+        job = {"title": "Data Steward", "company": "Acme",
+               "location": "Remote"}
+        scored = score_job(job, {"categories": ["data"]})
+        self.assertEqual(scored["category"], "data")
+        self.assertEqual(scored["categoryConfidence"], "low")
+        self.assertNotIn("category", scored["matchReasons"])
+        self.assertIn("category-unconfirmed", scored["matchReasons"])
+        # No bonus: same score as the same row with no category preference.
+        self.assertEqual(scored["matchScore"], score_job(job, {})["matchScore"])
+        # Still shortlisted — unconfirmed is a ranking signal, not a veto.
+        self.assertTrue(scored["matched"])
+
+    def test_missing_confidence_counts_as_high(self):
+        from network_jobs.prefs import category_confirmed
+
+        self.assertTrue(category_confirmed({"category": "product"}))
+        self.assertTrue(category_confirmed({"categoryConfidence": None}))
+        self.assertTrue(category_confirmed({"categoryConfidence": ""}))
+        self.assertTrue(category_confirmed({"categoryConfidence": "high"}))
+        self.assertFalse(category_confirmed({"categoryConfidence": "low"}))
+
+        # And through the scorer: a row with no field still earns +5.
+        from unittest import mock
+
+        legacy = {"title": "Data Steward", "company": "Acme",
+                  "location": "Remote"}
+        classified = {
+            "title": legacy["title"], "department": "", "company": "Acme",
+            "category": "data",  # no categoryConfidence key at all
+            "track": "ic", "seniority": "mid", "senioritySignals": [],
+            "locations": [], "locationBuckets": ["remote"],
+            "locationBucket": "remote",
+        }
+        with mock.patch("network_jobs.prefs.classify_job",
+                        side_effect=lambda job, company=None: dict(classified)):
+            scored = score_job(legacy, {"categories": ["data"]})
+        self.assertIn("category", scored["matchReasons"])
+        self.assertNotIn("category-unconfirmed", scored["matchReasons"])
+
+    def test_low_confidence_ranks_below_high_confidence(self):
+        # Identical rows apart from categoryConfidence: pin the classification
+        # so the confidence value is the only variable.
+        from unittest import mock
+
+        def fake_classify(job, company=None):
+            return {
+                "title": job["title"], "department": "", "company": "Acme",
+                "category": "product",
+                "categoryConfidence": job["confidence"],
+                "track": "ic", "seniority": "mid", "senioritySignals": [],
+                "locations": [], "locationBuckets": ["remote"],
+                "locationBucket": "remote", "url": job.get("url"),
+            }
+
+        rows = [
+            {"title": "A Low", "confidence": "low", "url": "https://x/1"},
+            {"title": "B High", "confidence": "high", "url": "https://x/2"},
+        ]
+        with mock.patch("network_jobs.prefs.classify_job",
+                        side_effect=fake_classify):
+            result = match_listings(rows, {"categories": ["product"]},
+                                    company="Acme")
+        self.assertEqual([j["title"] for j in result["jobs"]],
+                         ["B High", "A Low"])
+        self.assertGreater(result["jobs"][0]["matchScore"],
+                           result["jobs"][1]["matchScore"])
+        self.assertEqual(result["reasonCounts"].get("category-unconfirmed"), 1)
+
+
 class CompanyCapTests(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="nj-cap-"))
