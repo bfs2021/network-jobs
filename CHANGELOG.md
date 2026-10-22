@@ -38,8 +38,9 @@
   writing it, including duplicates from hand-edited files, and old triage dirs
   heal on the next helper write. Only labels the block actually renders are
   removed, so a manual card extract with no `index/pagination.json` keeps its
-  header `Pagination` line (`status=captured`) and a hand-filled `Status` is
-  not overwritten with a fabricated `complete`.
+  header `Pagination` line (`status=captured`). A hand-filled `Status` is
+  preserved, but a skeleton placeholder is still patched from the listing count
+  (`(pending)` with zero rows becomes `blocked`).
 - Staging silently dropped distinct postings whose board reuses one
   `requisition_id` (Greenhouse): `requisition_id` outranked the per-posting
   `id` in both `ID_KEYS` and `fingerprint.ats_id()`, so the fingerprint dedupe

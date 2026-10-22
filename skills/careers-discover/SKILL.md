@@ -166,7 +166,7 @@ before/after counts.
 
 8. **INVENTORY.md must include**
    - Company name + slug
-   - **`Careers URL`** and **`Status`** in the header, plus free-form fields (`Slug`, `Date`, `Caveats`, `Next steps`). `paginate`, `match-prefs` and `crawl-state` patch those from `index/*.json` on every write, so do not hand-maintain the numbers.
+   - **`Careers URL`** in the header, patched from `index/*.json` by `paginate`, `match-prefs` and `crawl-state` on every write, so do not hand-maintain it. **`Status`** is patched too when the helper has pagination data or when the header still holds a placeholder (`(pending)`/empty); a hand-filled value such as `captured` is kept. Free-form fields (`Slug`, `Date`, `Caveats`, `Next steps`) are never patched.
    - **`Listings`** — and **`Pagination`** when the helper has pagination data — in the `<!-- nj-summary -->` Pipeline summary block. The block is their canonical home, so each label appears exactly once in the file. The skeleton's `Listings`/`Pagination` header lines are pre-helper placeholders and are removed on the first helper write that renders those labels.
    - If no helper ran (a manual card extract), fill the header fields yourself from the files you wrote. A manual extract without `index/pagination.json` writes `Pagination` in the header — e.g. `pages=1, complete=false, truncated=false, status=captured (manual card extract)` — and `match-prefs` must not delete it (the summary block simply omits `Pagination`).
    - Listing count **and** “N of M match prefs”
@@ -180,8 +180,11 @@ before/after counts.
    `truncated` (cap hit — say which), `empty` (clean board, zero roles — say so
    plainly), `blocked` (nothing parseable came back — say which URL was
    unreachable and what the user can do) or `captured` (rows from a user save —
-   say “user capture, not a full crawl”). A `blocked` board is **not** a company
-   with no openings; never present it as one in chat or in the header.
+   say “user capture, not a full crawl”). Without `index/pagination.json`, a
+   placeholder `Status` is filled from the listing count — `blocked` for zero
+   rows, otherwise `complete` — while a hand-filled value is preserved. A
+   `blocked` board is **not** a company with no openings; never present it as
+   one in chat or in the header.
 
 9. **Hand off (hard stop)**
    - Point at each triage dir. Quote the helper’s `showing` line (e.g. `14 of 120 match prefs`) — do not paste the full listings array.
