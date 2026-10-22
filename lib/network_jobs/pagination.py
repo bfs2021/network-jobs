@@ -49,8 +49,8 @@ CURSOR_KEYS = ("nextCursor", "next_cursor", "cursor", "pageId", "page_id", "cont
 
 # Keys the mapping block reads (case-insensitively) into canonical fields, plus
 # the canonical field names themselves. Everything else on an ATS row is an
-# extra: it rides along so compensation/workplaceType/descriptionHtml are not
-# dropped, but a raw alias like jobUrl never shadows a canonical field.
+# extra: it rides along so compensation/workplaceType are not dropped, but a
+# raw alias like jobUrl never shadows a canonical field.
 _CONSUMED_KEYS = frozenset(
     key.lower()
     for key in (
@@ -65,6 +65,20 @@ CANONICAL_FIELDS = (
     "externalId", "postedAt", "salary",
 )
 _RESERVED_KEYS = frozenset(CANONICAL_FIELDS) | _CONSUMED_KEYS
+
+# Raw JD bodies are reserved too: they are NOT extras. ATS payloads ship the
+# full posting inline — Lever's `description` (HTML) plus `descriptionPlain` and
+# `lists`, Greenhouse's `content` (~45KB of escaped HTML with `?content=true`),
+# Ashby's `descriptionHtml`. SCHEMA.md reserves `description` for the plain-text
+# body truncated to ~10k chars and stamped with descriptionFetchedAt /
+# descriptionSource, and fetch-descriptions is the only writer of that trio.
+# Carrying a raw body here would (a) make `description` truthy so
+# fetch-descriptions skips the row, and (b) run mustHave/veto matching over
+# untruncated HTML and EEO boilerplate. Truncate-and-stamp belongs to
+# fetch-descriptions, not to staging.
+_JD_BODY_KEYS = frozenset({
+    "description", "content", "descriptionhtml", "descriptionplain", "lists",
+})
 
 DEFAULT_MAX_PAGES = 15
 DEFAULT_PAGE_SIZE = 50
@@ -157,12 +171,16 @@ def _merge_extras(listing: dict[str, Any], raw: dict[str, Any]) -> None:
 
     Extras never overwrite a canonical field and never re-introduce a raw
     alias for one (jobUrl, url_next_step, absolute_url, …), so a listings.json
-    row cannot disagree with itself about title/url/location.
+    row cannot disagree with itself about title/url/location. Raw JD bodies
+    (description, content, descriptionHtml, descriptionPlain, lists) are
+    reserved as well: they stay in the payload and out of the staged row,
+    where fetch-descriptions fills a clean truncated `description` instead.
     """
     for key, value in raw.items():
         if not isinstance(key, str) or not key:
             continue
-        if key.lower() in _RESERVED_KEYS or key in listing:
+        lowered = key.lower()
+        if lowered in _RESERVED_KEYS or lowered in _JD_BODY_KEYS or key in listing:
             continue
         if value is None:
             continue
@@ -191,27 +209,24 @@ def normalize_listing(raw: Any, source_url: str = "") -> dict[str, Any] | None:
     if not isinstance(raw, dict):
         return None
     # Already a staged listing — but only when it is genuinely schema-shaped:
-    # a non-empty string title, a non-empty string `url` that is the canonical
-    # url URL_KEYS resolves to, and a string location. A truthiness check cannot
-    # distinguish "has a value" from "is schema-shaped": Greenhouse sends
-    # location as an object, while Ashby hides the link under jobUrl and Amazon
-    # under url_next_step with a perfectly ordinary string location. Passing
-    # those through verbatim meant the mapping block never ran, so url came out
-    # missing on 812/812 Ashby and 1500/1500 Amazon rows. Finding the link only
-    # through an alias is not schema-shaped — any such row falls through to the
-    # mapping block below, which unpacks it into canonical fields.
+    # a non-empty string title, a non-empty string `url`, and a string
+    # location. A truthiness check cannot distinguish "has a value" from "is
+    # schema-shaped": Greenhouse sends location as an object, while Ashby hides
+    # the link under jobUrl and Amazon under url_next_step with a perfectly
+    # ordinary string location. Passing those through verbatim meant the
+    # mapping block never ran, so url came out missing on 812/812 Ashby and
+    # 1500/1500 Amazon rows. Finding the link only through an alias is not
+    # schema-shaped — any such row falls through to the mapping block below,
+    # which unpacks it into canonical fields.
     title_raw = raw.get("title")
     url_raw = raw.get("url")
     loc_raw = raw.get("location")
-    canonical_url = _url_from(raw)
-    url_is_canonical = (
-        isinstance(url_raw, str)
-        and bool(collapse_ws(url_raw))
-        and canonical_url == collapse_ws(url_raw)
-    )
+    # `url` is first in URL_KEYS, so a non-empty string `url` is exactly what
+    # _url_from() resolves to: this is a shape check, not a preference.
+    url_is_staged = isinstance(url_raw, str) and bool(collapse_ws(url_raw))
     if (
         isinstance(title_raw, str) and collapse_ws(title_raw)
-        and url_is_canonical
+        and url_is_staged
         and isinstance(loc_raw, str)
         and "matchScore" not in raw
     ):
@@ -222,7 +237,7 @@ def normalize_listing(raw: Any, source_url: str = "") -> dict[str, Any] | None:
     title = _first(raw, TITLE_KEYS)
     if not title:
         return None
-    url = canonical_url
+    url = _url_from(raw)
     loc_raw = None
     for key in LOC_KEYS:
         if raw.get(key) is not None:

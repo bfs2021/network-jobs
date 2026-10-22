@@ -1921,7 +1921,53 @@ class PaginationNormalizeTests(unittest.TestCase):
         # Extras ride along instead of being dropped by the mapping path.
         self.assertEqual(job["compensation"], {"compensationTierSummary": "$200k – $400k"})
         self.assertEqual(job["workplaceType"], "Hybrid")
-        self.assertEqual(job["descriptionHtml"], "<p>Build things.</p>")
+        # ...but raw JD bodies do not: they are reserved for fetch-descriptions,
+        # which writes a truncated plain-text description with provenance.
+        self.assertNotIn("descriptionHtml", job)
+
+    def test_raw_jd_bodies_not_carried_as_extras(self):
+        # Lever ships the whole posting inline: `description` (HTML) plus
+        # `descriptionPlain` and `lists`. Carried onto the listing it would be
+        # untruncated HTML that fetch-descriptions skips (truthy `description`)
+        # and that mustHave/veto matching runs over. Same for Greenhouse's
+        # `content` with ?content=true.
+        from network_jobs.pagination import normalize_listing
+
+        lever = {
+            "id": "8f0c1e2a-1111-2222-3333-444455556666",
+            "text": "Senior Product Manager",
+            "hostedUrl": "https://jobs.lever.co/acme/8f0c1e2a",
+            "categories": {"location": "New York, NY", "team": "Product"},
+            "description": "<div><p>Own the roadmap.</p><p>EEO boilerplate…</p></div>",
+            "descriptionPlain": "Own the roadmap. EEO boilerplate…",
+            "lists": [{"text": "Requirements", "content": "<li>5+ years</li>"}],
+            "workplaceType": "hybrid",
+        }
+        job = normalize_listing(lever, "https://api.lever.co/v0/postings/acme")
+        assert job is not None
+        self.assertEqual(job["url"], "https://jobs.lever.co/acme/8f0c1e2a")
+        self.assertEqual(job["title"], "Senior Product Manager")
+        self.assertEqual(job["externalId"], "8f0c1e2a-1111-2222-3333-444455556666")
+        self.assertEqual(job["workplaceType"], "hybrid")
+        for key in ("description", "content", "descriptionHtml",
+                    "descriptionPlain", "lists"):
+            self.assertNotIn(key, job)
+        # fetch-descriptions skips only rows whose description is truthy, so
+        # this row must stay falsy and get the clean truncated fetch.
+        self.assertFalse(job.get("description"))
+
+        greenhouse = {
+            "id": 8172487,
+            "title": "Product Manager",
+            "location": {"name": "San Francisco"},
+            "absolute_url": "https://boards.greenhouse.io/acme/jobs/8172487",
+            "content": "&lt;div&gt;" + "escaped HTML " * 500 + "&lt;/div&gt;",
+        }
+        gh = normalize_listing(
+            greenhouse, "https://boards-api.greenhouse.io/v1/boards/acme/jobs")
+        assert gh is not None
+        self.assertNotIn("content", gh)
+        self.assertFalse(gh.get("description"))
 
     def test_amazon_url_next_step_normalized(self):
         # Amazon search.json puts the link under url_next_step and the
