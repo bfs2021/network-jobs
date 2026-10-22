@@ -1296,6 +1296,125 @@ class ProductTitleClassificationTests(unittest.TestCase):
         self.assertNotIn("category-affinity", out["matchReasons"])
 
 
+class ProgramManagerClassificationTests(unittest.TestCase):
+    """#57: a program manager's domain decides the category, not "product".
+
+    The product row used to contain a bare `program manager`, so a compliance
+    program manager was a *confirmed* product role and outranked actual PMs on
+    a "product manager" search.
+    """
+
+    def _category(self, title):
+        from network_jobs.classify import classify_job
+
+        return classify_job({"title": title, "location": "Remote"})
+
+    def test_domain_program_managers_are_not_product(self):
+        for title, category in (
+            ("Senior Compliance Program Manager, Political Law", "legal"),
+            ("Legal Program Manager, Compute & Infrastructure", "legal"),
+            ("Regulatory Program Manager", "legal"),
+            ("Privacy Program Manager", "legal"),
+            ("Security Program Manager", "it-security"),
+            ("People Program Manager", "people"),
+            ("Sales Program Manager", "sales"),
+            ("Marketing Program Manager", "marketing"),
+            ("Operations Program Manager", "operations"),
+        ):
+            out = self._category(title)
+            self.assertEqual(out["category"], category, title)
+            self.assertEqual(out["categoryConfidence"], "high", title)
+            self.assertFalse(out["needsLlm"], title)
+
+    def test_product_and_technical_program_managers_stay_product(self):
+        for title in (
+            "Product Manager, Claude",
+            "Technical Product Manager",
+            "Technical Program Manager, Launches",
+            "TPM, Infrastructure",
+            "Group PM",
+            "Staff PM",
+            "Principal PM",
+            "Product Lead",
+            "Product Owner",
+        ):
+            out = self._category(title)
+            self.assertEqual(out["category"], "product", title)
+            self.assertEqual(out["categoryConfidence"], "high", title)
+
+    def test_bare_program_manager_is_ambiguous_not_product(self):
+        for title in ("Program Manager", "Senior Program Manager"):
+            out = self._category(title)
+            self.assertEqual(out["category"], "other", title)
+            self.assertEqual(out["categoryConfidence"], "low", title)
+            self.assertTrue(out["needsLlm"], title)
+
+        # No domain -> no category bonus on a product-only search. It also
+        # hard-fails like any other unrelated category (#40: a weak guess may
+        # fail to match; it must never earn points).
+        scored = score_job({"title": "Senior Program Manager", "company": "Acme",
+                            "location": "Remote"}, {"categories": ["product"]})
+        self.assertNotIn("category", scored["matchReasons"])
+        self.assertNotIn("category-affinity", scored["matchReasons"])
+        self.assertIn("category-mismatch", scored["matchReasons"])
+        self.assertFalse(scored["matched"])
+
+    def test_unrelated_titles_unchanged(self):
+        out = self._category("Senior Software Engineer")
+        self.assertEqual(out["category"], "engineering")
+        self.assertEqual(out["categoryConfidence"], "high")
+
+    def test_compliance_program_manager_does_not_outrank_pms(self):
+        tmp = Path(tempfile.mkdtemp(prefix="nj-program-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        corpus = tmp / "corpus"
+        corpus.mkdir()
+        jobs = [
+            {
+                "id": "compliance-pm",
+                "title": "Senior Compliance Program Manager, Political Law",
+                "company": "Anthropic",
+                "location": "Remote",
+                "lastSeen": "2026-10-20",
+            },
+            {
+                "id": "pm-claude",
+                "title": "Product Manager, Claude",
+                "company": "Anthropic",
+                "location": "Remote",
+                "lastSeen": "2026-10-20",
+            },
+            {
+                "id": "spm-growth",
+                "title": "Senior Product Manager, Growth",
+                "company": "Stripe",
+                "location": "Remote",
+                "lastSeen": "2026-10-20",
+            },
+            {
+                "id": "staff-pm-platform",
+                "title": "Staff Product Manager, Platform",
+                "company": "Figma",
+                "location": "Remote",
+                "lastSeen": "2026-10-20",
+            },
+        ]
+        (corpus / "jobs-all.json").write_text(json.dumps(jobs, indent=2) + "\n")
+        result = rank_corpus(
+            data_dir=tmp,
+            k=3,
+            query="product manager",
+            prefs={"categories": ["product"], "seniority": ["senior"],
+                   "workModes": ["remote"]},
+            resume_text="",
+        )
+        titles = [j["title"] for j in result["jobs"]]
+        self.assertEqual(len(titles), 3)
+        self.assertNotIn("Senior Compliance Program Manager, Political Law",
+                         titles)
+        self.assertIn("Senior Product Manager, Growth", titles)
+
+
 class CrawlAndIntroTests(unittest.TestCase):
     def test_intro_role_filters(self):
         from network_jobs.intros import filter_jobs
