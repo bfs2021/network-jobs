@@ -12,6 +12,7 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
+from urllib.error import HTTPError
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lib"))
@@ -2003,6 +2004,13 @@ class FetchDescriptionsTests(unittest.TestCase):
             return status, ctype, body.encode()
         return fetch
 
+    @staticmethod
+    def _http_error(url, code, msg="http error"):
+        """HTTPError with no body, closed so it raises no ResourceWarning."""
+        exc = HTTPError(url, code, msg, None, None)
+        exc.close()
+        return exc
+
     def test_strip_html_keeps_prose_drops_chrome(self):
         from network_jobs.descriptions import strip_html
 
@@ -2031,6 +2039,128 @@ class FetchDescriptionsTests(unittest.TestCase):
         self.assertEqual(js["department"], "Product")
         self.assertIn("error", fetch_job_description("https://x/gone", fetch=fetch))
         self.assertIn("error", fetch_job_description("not a url", fetch=fetch))
+
+    def test_fetch_job_description_reports_http_status(self):
+        # #64: the status code used to be erased into `fetch-failed: HTTPError`,
+        # so 429 (retryable) and 404 (gone) looked identical.
+        from network_jobs.descriptions import fetch_job_description
+
+        def fetch(url):
+            code = 429 if url.endswith("/throttled") else 404
+            raise self._http_error(url, code, "nope")
+
+        self.assertEqual(
+            fetch_job_description("https://x/throttled", fetch=fetch),
+            {"error": "http-429"})
+        self.assertEqual(
+            fetch_job_description("https://x/gone", fetch=fetch),
+            {"error": "http-404"})
+
+    def _retry_triage(self):
+        """Triage dir with one undescribed row, for the retry tests."""
+        tmp = Path(tempfile.mkdtemp(prefix="nj-desc-retry-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        index = tmp / "triage" / "t" / "index"
+        index.mkdir(parents=True)
+        (index / "matches.json").write_text(json.dumps([
+            {"title": "Senior PM", "url": "https://x/jobs/1"},
+        ]) + "\n")
+        return tmp / "triage" / "t"
+
+    def test_fetch_descriptions_retries_transient_failure(self):
+        # #64: a throttled first pass must not lose the body. Stateful fetch
+        # fails once with a network error, then succeeds; sleep is injected.
+        from network_jobs.descriptions import fetch_descriptions
+
+        triage = self._retry_triage()
+        calls = []
+        sleeps = []
+
+        def fetch(url):
+            calls.append(url)
+            if len(calls) == 1:
+                raise ConnectionError("throttled")
+            return 200, "text/html", self.HTML.encode()
+
+        result = fetch_descriptions(
+            triage, fetch=fetch, sleep=lambda s: sleeps.append(s))
+
+        self.assertEqual(result["fetched"], 1)
+        self.assertEqual(result["failed"], 0)
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(len(calls), 2)
+        self.assertIn("payments infrastructure",
+                      json.loads((triage / "index" / "matches.json")
+                                 .read_text())["jobs"][0]["description"])
+        self.assertTrue(sleeps)
+        self.assertEqual(sleeps, [1.0])
+
+    def test_fetch_descriptions_retries_429_then_backs_off(self):
+        # #64: 429 is retryable and the backoff doubles per attempt.
+        from network_jobs.descriptions import fetch_descriptions
+
+        triage = self._retry_triage()
+        calls = []
+        sleeps = []
+
+        def fetch(url):
+            calls.append(url)
+            if len(calls) <= 2:
+                raise self._http_error(url, 429, "slow down")
+            return 200, "text/html", self.HTML.encode()
+
+        result = fetch_descriptions(
+            triage, fetch=fetch, sleep=lambda s: sleeps.append(s))
+
+        self.assertEqual(result["fetched"], 1)
+        self.assertEqual(result["failed"], 0)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(sleeps, [1.0, 2.0])
+
+    def test_fetch_descriptions_gives_up_after_retries(self):
+        # #64: retries are bounded; the last error is recorded exactly as
+        # before, and the run still succeeds.
+        from network_jobs.descriptions import fetch_descriptions
+
+        triage = self._retry_triage()
+        calls = []
+        sleeps = []
+
+        def fetch(url):
+            calls.append(url)
+            return 503, "text/html", b"unavailable"
+
+        result = fetch_descriptions(
+            triage, fetch=fetch, sleep=lambda s: sleeps.append(s))
+
+        self.assertEqual(result["fetched"], 0)
+        self.assertEqual(result["failed"], 1)
+        self.assertEqual(len(calls), 3)  # one try + retries=2
+        self.assertEqual(sleeps, [1.0, 2.0])
+        self.assertEqual(len(result["errors"]), 1)
+        self.assertIn("http-503", result["errors"][0])
+
+    def test_fetch_descriptions_does_not_retry_404(self):
+        # #64: a closed role is not transient — exactly one request, no sleep.
+        from network_jobs.descriptions import fetch_descriptions
+
+        triage = self._retry_triage()
+        calls = []
+        sleeps = []
+
+        def fetch(url):
+            calls.append(url)
+            raise self._http_error(url, 404, "not found")
+
+        result = fetch_descriptions(
+            triage, fetch=fetch, sleep=lambda s: sleeps.append(s))
+
+        self.assertEqual(result["fetched"], 0)
+        self.assertEqual(result["failed"], 1)
+        self.assertEqual(len(result["errors"]), 1)
+        self.assertIn("http-404", result["errors"][0])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(sleeps, [])
 
     def test_fetch_descriptions_writes_back_matches(self):
         from network_jobs.descriptions import fetch_descriptions

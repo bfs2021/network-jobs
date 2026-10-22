@@ -10,10 +10,12 @@ Failures never fail the run: undescribed jobs score exactly as before.
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from .matches import MatchesFormatError, load_matches, write_matches
@@ -141,6 +143,9 @@ def fetch_job_description(
                 status = getattr(resp, "status", 200) or 200
                 content_type = resp.headers.get("Content-Type", "")
                 body = resp.read(MAX_DOWNLOAD_BYTES + 1)
+    except HTTPError as exc:
+        # Keep the status so callers can tell 429/5xx (retryable) from 404.
+        return {"error": f"http-{exc.code}"}
     except Exception as exc:
         return {"error": f"fetch-failed: {type(exc).__name__}"}
     if status and status >= 400:
@@ -180,6 +185,44 @@ def _utcnow() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _is_retryable(error: str) -> bool:
+    """Transient failures worth another attempt.
+
+    Throttling (429), server errors (5xx) and network/timeout errors
+    (`fetch-failed: <Type>`) usually clear on a second try — a burst of
+    requests gets rate-limited but the same page answers moments later.
+    Everything else (other 4xx, non-http URLs, oversized bodies, pages with
+    no usable body) is a property of the URL, not of the moment.
+    """
+    if not error:
+        return False
+    if error == "http-429" or error.startswith("fetch-failed:"):
+        return True
+    if error.startswith("http-5") and error[len("http-"):].isdigit():
+        return True
+    return False
+
+
+def _describe_with_retry(
+    url: str,
+    *,
+    timeout: int,
+    fetch,
+    retries: int,
+    retry_delay: float,
+    sleep,
+) -> dict[str, Any]:
+    """Fetch one JD, retrying transient errors with exponential backoff."""
+    attempts = max(0, int(retries))
+    result = fetch_job_description(url, timeout=timeout, fetch=fetch)
+    attempt = 0
+    while attempt < attempts and _is_retryable(str(result.get("error") or "")):
+        sleep(retry_delay * (2 ** attempt))
+        attempt += 1
+        result = fetch_job_description(url, timeout=timeout, fetch=fetch)
+    return result
+
+
 def fetch_descriptions(
     triage_dir: str | Path,
     *,
@@ -187,9 +230,18 @@ def fetch_descriptions(
     timeout: int = DEFAULT_TIMEOUT,
     max_chars: int = MAX_JD_CHARS,
     fetch=None,
+    retries: int = 2,
+    retry_delay: float = 1.0,
+    sleep=time.sleep,
 ) -> dict[str, Any]:
     """Fill `description` for staged jobs in place. Never raises for fetch
     failures — they land in `failed` and the run continues.
+
+    Transient errors (429, 5xx, network/timeout) get up to `retries` extra
+    attempts, sleeping `retry_delay * 2**attempt` between them; `sleep` is
+    injectable so tests stay instant. A burst of requests against one board
+    is exactly the case that throttles, and a single lost pass used to leave
+    every affected row scored as if it had no JD.
 
     `matches.json` keeps its documented object shape (#32): the wrapper and
     its summary keys are read through `load_matches` and written back through
@@ -231,7 +283,9 @@ def fetch_descriptions(
             skipped += 1
             continue
         url = str(job.get("url") or "")
-        result = fetch_job_description(url, timeout=timeout, fetch=fetch)
+        result = _describe_with_retry(
+            url, timeout=timeout, fetch=fetch, retries=retries,
+            retry_delay=retry_delay, sleep=sleep)
         if "error" in result:
             failed += 1
             if len(errors) < 5:
