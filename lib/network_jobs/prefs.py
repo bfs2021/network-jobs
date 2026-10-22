@@ -178,11 +178,11 @@ def must_have_hits(job: dict[str, Any], must_haves: list[str] | None) -> list[st
 def category_confirmed(job: dict[str, Any]) -> bool:
     """True when the job's category is a confident classification (#40).
 
-    A *missing* ``categoryConfidence`` counts as high. Older corpus rows and
-    hand-written fixtures predate the field, and treating them as low would
-    silently strip the category bonus from every existing shortlist on the
-    next rebuild — a much bigger change than #40 asks for. Only an explicit
-    non-high value (``"low"``) downgrades a row.
+    Only an explicit non-high value (``"low"``) downgrades a row; a missing
+    ``categoryConfidence`` counts as high. ``score_job`` always scores the
+    output of ``classify_job``, which sets the field on every row, so this
+    lenient default only matters to direct callers of this helper —
+    hand-written fixtures and tests, not corpus rows.
     """
     return str(job.get("categoryConfidence") or "high").strip().lower() == "high"
 

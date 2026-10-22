@@ -1792,12 +1792,15 @@ class CategoryConfidenceTests(unittest.TestCase):
         self.assertEqual(scored["matchScore"] - baseline["matchScore"], 5)
 
     def test_low_confidence_exact_match_gets_no_bonus(self):
-        # "Product Analyst" lands in `product` on the weak "product" token,
-        # i.e. exactly the low-confidence guess #40 is about.
-        job = {"title": "Product Analyst", "company": "Acme",
+        # "Data Steward" lands in `data` on the weak "data" token, i.e.
+        # exactly the low-confidence guess #40 is about. Deliberately not a
+        # "product" title: #37 removes the weak `product` token, so a
+        # "Product Analyst" fixture would classify `other`/low once both
+        # branches merge. This one stays `data`/low either way.
+        job = {"title": "Data Steward", "company": "Acme",
                "location": "Remote"}
-        scored = score_job(job, {"categories": ["product"]})
-        self.assertEqual(scored["category"], "product")
+        scored = score_job(job, {"categories": ["data"]})
+        self.assertEqual(scored["category"], "data")
         self.assertEqual(scored["categoryConfidence"], "low")
         self.assertNotIn("category", scored["matchReasons"])
         self.assertIn("category-unconfirmed", scored["matchReasons"])
@@ -1815,21 +1818,21 @@ class CategoryConfidenceTests(unittest.TestCase):
         self.assertTrue(category_confirmed({"categoryConfidence": "high"}))
         self.assertFalse(category_confirmed({"categoryConfidence": "low"}))
 
-        # And through the scorer: a legacy row with no field still earns +5.
+        # And through the scorer: a row with no field still earns +5.
         from unittest import mock
 
-        legacy = {"title": "Product Analyst", "company": "Acme",
+        legacy = {"title": "Data Steward", "company": "Acme",
                   "location": "Remote"}
         classified = {
             "title": legacy["title"], "department": "", "company": "Acme",
-            "category": "product",  # no categoryConfidence key at all
+            "category": "data",  # no categoryConfidence key at all
             "track": "ic", "seniority": "mid", "senioritySignals": [],
             "locations": [], "locationBuckets": ["remote"],
             "locationBucket": "remote",
         }
         with mock.patch("network_jobs.prefs.classify_job",
                         side_effect=lambda job, company=None: dict(classified)):
-            scored = score_job(legacy, {"categories": ["product"]})
+            scored = score_job(legacy, {"categories": ["data"]})
         self.assertIn("category", scored["matchReasons"])
         self.assertNotIn("category-unconfirmed", scored["matchReasons"])
 
