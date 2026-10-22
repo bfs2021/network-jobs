@@ -747,6 +747,63 @@ class ClassifierLocationTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(env_jobs, json.loads(dest.read_text()))
 
+    def test_classify_in_place_keeps_matches_envelope(self):
+        # No `--out` means `dest == --input`. On a matches.json object that
+        # must stay an object with its summary keys: writing `result["jobs"]`
+        # straight back would re-create the #32 bare-array flip.
+        tmp = Path(tempfile.mkdtemp(prefix="nj-clf-inplace-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        matches = tmp / "index" / "matches.json"
+        matches.parent.mkdir(parents=True)
+        envelope = {
+            "nListings": 42,
+            "nMatches": 2,
+            "showing": 2,
+            "departments": {"Product": 1, "Engineering": 1},
+            "ingestDefault": "matches",
+            "jobs": [
+                {"title": "Senior Product Manager", "location": "New York, NY"},
+                {"title": "Engineering Manager", "location": "Remote"},
+            ],
+        }
+        matches.write_text(json.dumps(envelope) + "\n")
+
+        rc = helper_main(["classify", "--input", str(matches), "--company", "Stripe"])
+        self.assertEqual(rc, 0)
+
+        written = json.loads(matches.read_text())
+        self.assertIsInstance(written, dict)
+        self.assertEqual(written["nListings"], 42)
+        self.assertEqual(written["nMatches"], 2)
+        self.assertEqual(written["showing"], 2)
+        self.assertEqual(written["departments"],
+                         {"Product": 1, "Engineering": 1})
+        self.assertEqual(written["ingestDefault"], "matches")
+        self.assertEqual([j["title"] for j in written["jobs"]],
+                         ["Senior Product Manager", "Engineering Manager"])
+        self.assertEqual(written["jobs"][0]["category"], "product")
+        self.assertEqual(written["jobs"][1]["track"], "manager")
+
+    def test_classify_in_place_upgrades_legacy_bare_array(self):
+        # A bare-array input has no summary keys to preserve, so an in-place
+        # run upgrades it to the documented object, matching `normalize_matches`.
+        tmp = Path(tempfile.mkdtemp(prefix="nj-clf-upgrade-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        matches = tmp / "index" / "matches.json"
+        matches.parent.mkdir(parents=True)
+        matches.write_text(json.dumps([
+            {"title": "Senior Product Manager", "location": "New York, NY"},
+        ]) + "\n")
+
+        rc = helper_main(["classify", "--input", str(matches), "--company", "Stripe"])
+        self.assertEqual(rc, 0)
+
+        written = json.loads(matches.read_text())
+        self.assertIsInstance(written, dict)
+        self.assertEqual(written["nMatches"], 1)
+        self.assertEqual(written["ingestDefault"], "matches")
+        self.assertEqual(written["jobs"][0]["category"], "product")
+
     def test_classify_rejects_unrecognised_shape(self):
         tmp = Path(tempfile.mkdtemp(prefix="nj-clf-bad-"))
         self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))

@@ -845,8 +845,10 @@ def cmd_rebuild(args: argparse.Namespace) -> int:
 def cmd_classify(args: argparse.Namespace) -> int:
     # Ingest reads matches.json by default, so accept the documented object
     # and legacy bare arrays through the same normalizer every other reader
-    # uses (#32). Output stays a bare array: rebuild-corpus consumes a job
-    # list, not a matches envelope.
+    # uses (#32). `--out` stays a bare array: rebuild-corpus consumes a job
+    # list, not a matches envelope. Writing back over the input, though, goes
+    # through `write_matches` with the envelope's summary keys intact, because
+    # a bare array there is the #32 shape flip again.
     try:
         envelope = normalize_matches(
             _load_json(Path(args.input), []), origin=args.input
@@ -859,7 +861,13 @@ def cmd_classify(args: argparse.Namespace) -> int:
     result = classify_listings(listings, company=args.company or None)
     dest = Path(args.out) if args.out else Path(args.input)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(json.dumps(result["jobs"], indent=2, ensure_ascii=False) + "\n")
+    if dest.resolve() == Path(args.input).resolve():
+        # In place: keep the documented object shape. Summary keys (`showing`,
+        # `ingestDefault`, `departments`, `nListings`, ...) ride through; a
+        # legacy bare array input is upgraded here as every other writer does.
+        write_matches(dest, {**envelope, "jobs": result["jobs"]})
+    else:
+        dest.write_text(json.dumps(result["jobs"], indent=2, ensure_ascii=False) + "\n")
     quiet = {
         "n": result["n"],
         "ambiguous": result["ambiguous"],

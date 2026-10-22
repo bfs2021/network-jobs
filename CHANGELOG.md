@@ -8,6 +8,12 @@
   the object back — wrapper and summary keys preserved — instead of
   `json.dumps(jobs)`. A legacy bare array is read and upgraded in place on
   the next pass, so existing triage dirs keep working.
+- `classify` run in place (`--input` with no `--out`) now keeps
+  `index/matches.json` an object: the classified jobs replace `jobs` and the
+  summary keys (`showing`, `ingestDefault`, `departments`, `nListings`,
+  `nMatches`) ride through. A legacy bare array is upgraded to the object on
+  that pass. With `--out` it still writes a bare job array, which is what
+  `rebuild-corpus` consumes.
 - `review-matches --veto` no longer drops fetched JD bodies when it
   re-scores: it carries prior descriptions onto `listings.json` the same way
   `match-prefs` does (#24). The join also matches rows that have no
