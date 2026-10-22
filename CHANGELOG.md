@@ -28,8 +28,6 @@
   @hirefrank/network-jobs@latest` — re-fetching the suite setup had just
   resolved. Off-PATH installs now print the launcher's absolute path (quote-safe);
   installs whose directory is on `PATH` keep the bare `network-jobs`.
-
-### Fixed
 - `fetch-descriptions` no longer loses bodies to a throttled pass, and says why
   a page failed (#64). `fetch-failed: HTTPError` became `http-<code>`, so a
   closed role (404) no longer looks like throttling (429) or a timeout;
@@ -45,6 +43,8 @@
   222 rows into 666 requests and ~11 minutes of sleep. On the live Anthropic
   board the first pass fetched 185 of 222 bodies and the immediate rerun
   fetched the missing 37/37.
+
+### Fixed
 - Staging silently dropped distinct postings whose board reuses one
   `requisition_id` (Greenhouse): `requisition_id` outranked the per-posting
   `id` in both `ID_KEYS` and `fingerprint.ats_id()`, so the fingerprint dedupe
