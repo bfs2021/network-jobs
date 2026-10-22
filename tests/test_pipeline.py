@@ -1871,6 +1871,104 @@ class PaginationNormalizeTests(unittest.TestCase):
         self.assertEqual(job["location"], "Remote")
         self.assertEqual(job["sourceUrl"], "https://src")
 
+    def test_staged_listing_keeps_extras(self):
+        # A genuinely schema-shaped row may pass through verbatim, but the
+        # ATS extras that came with it must survive (they used to, by accident
+        # of the passthrough; the mapping path must not become lossy).
+        from network_jobs.pagination import normalize_listing
+
+        staged = {
+            "title": "Eng", "url": "https://x/1", "location": "Remote",
+            "externalId": "42", "compensation": {"min": 100000},
+            "workplaceType": "Hybrid", "isRemote": True,
+        }
+        job = normalize_listing(staged, "https://src")
+        assert job is not None
+        self.assertEqual(job["url"], "https://x/1")
+        self.assertEqual(job["sourceUrl"], "https://src")
+        self.assertEqual(job["compensation"], {"min": 100000})
+        self.assertEqual(job["workplaceType"], "Hybrid")
+        self.assertIs(job["isRemote"], True)
+
+    def test_ashby_job_url_normalized(self):
+        # Ashby sends the link under jobUrl with a plain string location, so
+        # the old passthrough guard returned the raw row and every row lost
+        # its canonical url (0 of 812 in the reported run).
+        from network_jobs.pagination import normalize_listing
+
+        raw = {
+            "id": "0f2a6d10-1c4e-4f0c-9d0b-8a7f6e5d4c3b",
+            "title": "Member of Technical Staff",
+            "location": "San Francisco, CA",
+            "jobUrl": "https://jobs.ashbyhq.com/openai/0f2a6d10",
+            "applyUrl": "https://jobs.ashbyhq.com/openai/0f2a6d10/apply",
+            "department": "Research",
+            "team": "Alignment",
+            "workplaceType": "Hybrid",
+            "compensation": {"compensationTierSummary": "$200k – $400k"},
+            "descriptionHtml": "<p>Build things.</p>",
+        }
+        job = normalize_listing(raw, "https://api.ashbyhq.com/posting-api/job-board/openai")
+        assert job is not None
+        self.assertEqual(job["url"], "https://jobs.ashbyhq.com/openai/0f2a6d10")
+        self.assertEqual(job["title"], "Member of Technical Staff")
+        self.assertEqual(job["location"], "San Francisco, CA")
+        self.assertEqual(job["externalId"], "0f2a6d10-1c4e-4f0c-9d0b-8a7f6e5d4c3b")
+        # department beats team; the raw url aliases do not leak through.
+        self.assertEqual(job["department"], "Research")
+        self.assertNotIn("jobUrl", job)
+        self.assertNotIn("applyUrl", job)
+        # Extras ride along instead of being dropped by the mapping path.
+        self.assertEqual(job["compensation"], {"compensationTierSummary": "$200k – $400k"})
+        self.assertEqual(job["workplaceType"], "Hybrid")
+        self.assertEqual(job["descriptionHtml"], "<p>Build things.</p>")
+
+    def test_amazon_url_next_step_normalized(self):
+        # Amazon search.json puts the link under url_next_step and the
+        # department under job_category (with team as a narrower secondary).
+        from network_jobs.pagination import extract_job_list, normalize_listing
+
+        raw = {
+            "id": "2829431",
+            "title": "Software Development Engineer II",
+            "location": "Seattle, WA",
+            "url_next_step": "https://www.amazon.jobs/en/jobs/2829431",
+            "job_category": "Software Development",
+            "team": "Amazon Web Services",
+            "business_category": "Amazon Web Services",
+        }
+        self.assertEqual(extract_job_list({"jobs": [raw]}), [raw])
+        job = normalize_listing(raw, "https://www.amazon.jobs/en/search.json")
+        assert job is not None
+        self.assertEqual(job["url"], "https://www.amazon.jobs/en/jobs/2829431")
+        self.assertEqual(job["externalId"], "2829431")
+        self.assertEqual(job["department"], "Software Development")
+        self.assertNotIn("url_next_step", job)
+
+    def test_greenhouse_departments_list_mapped(self):
+        # Greenhouse nests departments as [{"name": ...}]. "departments" was
+        # missing from DEPT_KEYS, so department was null on every row even
+        # though the row already reached the mapping block.
+        from network_jobs.pagination import normalize_listing
+
+        raw = {
+            "id": 8172487,
+            "title": "Product Manager",
+            "location": {"name": "San Francisco"},
+            "absolute_url": "https://boards.greenhouse.io/anthropic/jobs/8172487",
+            "departments": [{"id": 1, "name": "Product"}, {"id": 2, "name": "Growth"}],
+            "updated_at": "2026-09-18T12:00:00-04:00",
+        }
+        job = normalize_listing(raw, "https://boards-api.greenhouse.io/v1/boards/anthropic/jobs")
+        assert job is not None
+        self.assertEqual(job["url"], "https://boards.greenhouse.io/anthropic/jobs/8172487")
+        self.assertEqual(job["externalId"], "8172487")
+        self.assertEqual(job["location"], "San Francisco")
+        self.assertEqual(job["department"], "Product")
+        self.assertEqual(job["postedAt"], "2026-09-18")
+        # The consumed alias must not also appear as an extra.
+        self.assertNotIn("departments", job)
+
     def test_string_salary_parsed(self):
         from network_jobs.pagination import normalize_listing
 

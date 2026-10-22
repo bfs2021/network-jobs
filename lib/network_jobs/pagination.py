@@ -27,13 +27,44 @@ LIST_KEYS = (
 TITLE_KEYS = ("title", "jobTitle", "job_title", "name", "text", "role")
 URL_KEYS = (
     "url", "absolute_url", "absoluteUrl", "hostedUrl", "hosted_url",
-    "jobUrl", "job_url", "applyUrl", "apply_url", "gh_src", "absolute_url",
+    "jobUrl", "job_url", "applyUrl", "apply_url", "url_next_step",
+    "urlNextStep", "gh_src", "absolute_url",
 )
 LOC_KEYS = ("location", "jobLocation", "job_location", "workplace", "city")
-DEPT_KEYS = ("department", "team", "departmentName", "department_name", "group")
+# First non-empty candidate wins. Precedence: a key literally named
+# "department" (Ashby, most custom APIs) beats the Greenhouse plural
+# "departments" list, which beats camel/snake spellings of departmentName,
+# which beats the broader "job_category" (Amazon) and finally "team"
+# (Ashby's secondary org label) and "group". business_category is
+# deliberately absent: it names a business unit, not the hiring department.
+# Appending a new shape here is the supported extension point — no per-board
+# branching (see skills/careers-discover/SKILL.md).
+DEPT_KEYS = (
+    "department", "departments", "departmentName", "department_name",
+    "job_category", "jobCategory", "team", "group",
+)
 ID_KEYS = ("externalId", "atsId", "jobId", "job_id", "requisitionId", "requisition_id", "id")
 NEXT_KEYS = ("next", "nextPage", "next_page", "nextUrl", "next_url")
 CURSOR_KEYS = ("nextCursor", "next_cursor", "cursor", "pageId", "page_id", "continuationToken")
+
+# Keys the mapping block reads (case-insensitively) into canonical fields, plus
+# the canonical field names themselves. Everything else on an ATS row is an
+# extra: it rides along so compensation/workplaceType/descriptionHtml are not
+# dropped, but a raw alias like jobUrl never shadows a canonical field.
+_CONSUMED_KEYS = frozenset(
+    key.lower()
+    for key in (
+        TITLE_KEYS + URL_KEYS + LOC_KEYS + DEPT_KEYS + ID_KEYS
+        + ("locations", "salary", "postedAt", "posted_at", "updated_at",
+           "updatedAt", "firstPublished", "publishedAt", "sourceUrl",
+           "matchScore")
+    )
+)
+CANONICAL_FIELDS = (
+    "title", "url", "location", "sourceUrl", "locations", "department",
+    "externalId", "postedAt", "salary",
+)
+_RESERVED_KEYS = frozenset(CANONICAL_FIELDS) | _CONSUMED_KEYS
 
 DEFAULT_MAX_PAGES = 15
 DEFAULT_PAGE_SIZE = 50
@@ -111,6 +142,33 @@ def _location_from(raw: Any) -> tuple[str, list[Any]]:
     return collapse_ws(str(raw)), [collapse_ws(str(raw))]
 
 
+def _url_from(raw: dict[str, Any]) -> str:
+    """Canonical url for a raw ATS row via URL_KEYS, or "" when absent."""
+    url = _first(raw, URL_KEYS)
+    if isinstance(url, dict):
+        url = url.get("href") or url.get("url") or ""
+    if url in (None, ""):
+        return ""
+    return collapse_ws(str(url))
+
+
+def _merge_extras(listing: dict[str, Any], raw: dict[str, Any]) -> None:
+    """Carry unknown ATS fields onto the normalized listing, in place.
+
+    Extras never overwrite a canonical field and never re-introduce a raw
+    alias for one (jobUrl, url_next_step, absolute_url, …), so a listings.json
+    row cannot disagree with itself about title/url/location.
+    """
+    for key, value in raw.items():
+        if not isinstance(key, str) or not key:
+            continue
+        if key.lower() in _RESERVED_KEYS or key in listing:
+            continue
+        if value is None:
+            continue
+        listing[key] = value
+
+
 def _normalize_salary_posted(listing: dict[str, Any]) -> None:
     """Parse string salaries and canonicalize postedAt, in place.
 
@@ -132,17 +190,31 @@ def _normalize_salary_posted(listing: dict[str, Any]) -> None:
 def normalize_listing(raw: Any, source_url: str = "") -> dict[str, Any] | None:
     if not isinstance(raw, dict):
         return None
-    # Already a staged listing — but only when the fields that prove it are
-    # plain strings. A truthiness check cannot distinguish "has a value" from
-    # "is schema-shaped": Greenhouse boards-api sends location as an object
-    # (and occasionally url as one), which sailed through verbatim and broke
-    # SCHEMA downstream (missing url/externalId, dict where a string belongs).
-    # Non-string shapes fall through to the mapping block, which unpacks them.
+    # Already a staged listing — but only when it is genuinely schema-shaped:
+    # a non-empty string title, a non-empty string `url` that is the canonical
+    # url URL_KEYS resolves to, and a string location. A truthiness check cannot
+    # distinguish "has a value" from "is schema-shaped": Greenhouse sends
+    # location as an object, while Ashby hides the link under jobUrl and Amazon
+    # under url_next_step with a perfectly ordinary string location. Passing
+    # those through verbatim meant the mapping block never ran, so url came out
+    # missing on 812/812 Ashby and 1500/1500 Amazon rows. Finding the link only
+    # through an alias is not schema-shaped — any such row falls through to the
+    # mapping block below, which unpacks it into canonical fields.
+    title_raw = raw.get("title")
     url_raw = raw.get("url")
     loc_raw = raw.get("location")
-    has_url = isinstance(url_raw, str) and bool(collapse_ws(url_raw))
-    has_str_loc = isinstance(loc_raw, str) and bool(collapse_ws(loc_raw))
-    if raw.get("title") and (has_url or has_str_loc) and "matchScore" not in raw:
+    canonical_url = _url_from(raw)
+    url_is_canonical = (
+        isinstance(url_raw, str)
+        and bool(collapse_ws(url_raw))
+        and canonical_url == collapse_ws(url_raw)
+    )
+    if (
+        isinstance(title_raw, str) and collapse_ws(title_raw)
+        and url_is_canonical
+        and isinstance(loc_raw, str)
+        and "matchScore" not in raw
+    ):
         listing = dict(raw)
         listing.setdefault("sourceUrl", source_url)
         _normalize_salary_posted(listing)
@@ -150,9 +222,7 @@ def normalize_listing(raw: Any, source_url: str = "") -> dict[str, Any] | None:
     title = _first(raw, TITLE_KEYS)
     if not title:
         return None
-    url = _first(raw, URL_KEYS)
-    if isinstance(url, dict):
-        url = url.get("href") or url.get("url") or ""
+    url = canonical_url
     loc_raw = None
     for key in LOC_KEYS:
         if raw.get(key) is not None:
@@ -173,7 +243,7 @@ def normalize_listing(raw: Any, source_url: str = "") -> dict[str, Any] | None:
     salary = raw.get("salary")
     listing: dict[str, Any] = {
         "title": collapse_ws(str(title)),
-        "url": collapse_ws(str(url or "")),
+        "url": url,
         "location": location,
         "sourceUrl": source_url,
     }
@@ -191,6 +261,7 @@ def normalize_listing(raw: Any, source_url: str = "") -> dict[str, Any] | None:
         parsed = parse_salary(salary)
         if parsed:
             listing["salary"] = parsed
+    _merge_extras(listing, raw)
     _normalize_salary_posted(listing)
     if not listing["url"] and not listing["location"] and not listing.get("externalId"):
         return None
