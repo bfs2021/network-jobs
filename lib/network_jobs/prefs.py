@@ -175,6 +175,18 @@ def must_have_hits(job: dict[str, Any], must_haves: list[str] | None) -> list[st
     return hits
 
 
+def category_confirmed(job: dict[str, Any]) -> bool:
+    """True when the job's category is a confident classification (#40).
+
+    A *missing* ``categoryConfidence`` counts as high. Older corpus rows and
+    hand-written fixtures predate the field, and treating them as low would
+    silently strip the category bonus from every existing shortlist on the
+    next rebuild — a much bigger change than #40 asks for. Only an explicit
+    non-high value (``"low"``) downgrades a row.
+    """
+    return str(job.get("categoryConfidence") or "high").strip().lower() == "high"
+
+
 def score_job(
     job: dict[str, Any],
     prefs: dict[str, Any] | None,
@@ -225,20 +237,33 @@ def score_job(
     cats = [str(c).lower() for c in (prefs.get("categories") or [])]
     if cats:
         job_cat = str(classified.get("category") or "")
+        # Both category branches require the same thing: a HIGH-confidence
+        # classification. A weak title-token guess must not rank like a
+        # confirmed match (#23) — whether it lands in a preferred category
+        # (exact) or an adjacent one (affinity), it records
+        # `category-unconfirmed` and earns no bonus (#40).
+        confirmed = category_confirmed(classified)
         if job_cat in cats:
-            score += 5
-            reasons.append("category")
+            if confirmed:
+                score += 5
+                reasons.append("category")
+            else:
+                reasons.append("category-unconfirmed")
         elif any(job_cat in CATEGORY_AFFINITY.get(c, ()) for c in cats):
             # Adjacent category: keep the job in the running with a smaller
             # bonus, but never hard-fail it the way an unrelated category does.
-            # The bonus requires a HIGH-confidence classification — a weak
-            # title-token guess must not ride affinity into the shortlist (#23).
-            if str(classified.get("categoryConfidence") or "") == "high":
+            if confirmed:
                 score += 2
                 reasons.append("category-affinity")
             else:
                 reasons.append("category-unconfirmed")
         else:
+            # Not preferred, not adjacent. The hard fail stays even when the
+            # classification is low-confidence (#40 decision 3): "other"/low is
+            # the fallback for unclassifiable titles, so exempting it would let
+            # every unplaced job into category-filtered shortlists. An
+            # unconfirmed guess must not *earn* a bonus; it may still fail to
+            # match the stated preference.
             score -= 1
             hard_fail = True
             reasons.append("category-mismatch")
