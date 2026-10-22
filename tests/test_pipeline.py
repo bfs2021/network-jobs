@@ -2700,6 +2700,55 @@ class CompanyCapTests(unittest.TestCase):
         self.assertIn("2 more held back by the 3-per-company cap", text)
 
 
+class EmptySearchHintTests(unittest.TestCase):
+    """#54: an empty shortlist must not print a bare "0 of 0" dead end."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="nj-empty-"))
+        self.addCleanup(lambda: shutil.rmtree(self.tmp, ignore_errors=True))
+        self.tmp.joinpath("corpus").mkdir()
+        self.tmp.joinpath("preferences.json").write_text(
+            json.dumps({"categories": ["product"]}) + "\n")
+
+    def _search(self, *argv):
+        out = StringIO()
+        with redirect_stdout(out):
+            rc = helper_main(["search", "--data", str(self.tmp), *argv])
+        self.assertEqual(rc, 0)
+        return out.getvalue()
+
+    def test_empty_corpus_points_at_discovery_and_ingest(self):
+        text = self._search()
+        self.assertIn("0 of 0 match prefs", text)
+        self.assertIn("corpus is empty", text)
+        self.assertIn("find open roles", text)
+        self.assertIn("ingest", text)
+
+    def test_query_with_no_matches_names_query_and_prefs(self):
+        (self.tmp / "preferences.json").write_text(
+            json.dumps({"dealBreakers": ["defense"]}) + "\n")
+        (self.tmp / "corpus" / "jobs-all.json").write_text(json.dumps([{
+            "title": "Product Manager",
+            "company": "Defense Systems",
+            "department": "Product",
+            "location": "Remote",
+            "lastSeen": "2026-10-20",
+            "url": "https://example.com/1",
+        }]) + "\n")
+        text = self._search("--query", "product manager")
+        self.assertIn("0 of 0 match prefs for 'product manager'", text)
+        self.assertIn("no postings match 'product manager' in the current corpus",
+                      text)
+        self.assertIn("prefs filtering also applies", text)
+
+    def test_json_output_stays_pure(self):
+        text = self._search("--json")
+        payload = json.loads(text)
+        self.assertEqual(payload["showing"], "0 of 0")
+        self.assertEqual(payload["jobs"], [])
+        self.assertNotIn("corpus is empty", text)
+
+
 class SalaryParseTests(unittest.TestCase):
     def test_range(self):
         from network_jobs.salary import parse_salary

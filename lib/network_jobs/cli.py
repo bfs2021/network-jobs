@@ -489,6 +489,21 @@ def cmd_search(args: argparse.Namespace) -> int:
               f" — use --company-cap 0 to see them)")
     if result.get("staleHidden"):
         print(f"({result['staleHidden']} stale postings hidden — re-run with --include-stale)")
+    if not result["jobs"] and not result.get("staleHidden"):
+        # #54: a bare "0 of 0" is a dead end on a first run. Say whether the
+        # corpus is empty or the filters did it, and name the next step.
+        from .corpus import load_existing_jobs
+
+        corpus_jobs = len(load_existing_jobs(data / "corpus"))
+        if corpus_jobs == 0:
+            print("corpus is empty — have your agent find open roles, review the"
+                  " triage batch, then ingest")
+        elif args.query:
+            print(f"no postings match {args.query!r} in the current corpus"
+                  " — prefs filtering also applies; check preferences.json")
+        else:
+            print(f"no postings match your prefs ({corpus_jobs} in the corpus)"
+                  " — check preferences.json")
     today = _date.today()
     for job in result["jobs"]:
         bits = [str(job.get("title") or "untitled"), str(job.get("company") or "")]
