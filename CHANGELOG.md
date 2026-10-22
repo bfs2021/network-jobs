@@ -1,8 +1,12 @@
 # Changelog
 
-## Unreleased
+## v1.9.0 — 2026-10-22
 
 ### Changed
+- `setup` now explains the optional semantic-matching upgrade (`embed-setup`):
+  what it adds, that it pip-installs fastembed (+onnxruntime) and downloads a
+  ~60MB model, and that it prefers an already-running local Ollama. Keyword
+  scoring still works without it (#53).
 - The `~/.local/bin/network-jobs` launcher now **fails loudly when
   `suite-root` records a suite that no longer exists**, instead of silently
   running the registry build. A dangling cached/npm install and a healthy one
@@ -54,6 +58,18 @@
   answered 200 about 45s later while `boards-api.greenhouse.io` stayed up.
 
 ### Fixed
+- `search` explains an empty shortlist instead of printing a bare `0 of 0`:
+  an empty corpus points at discovery + ingest, and a query with no matches
+  says what to try instead (#54, #56).
+- Program-manager titles are classified by their domain: compliance, legal,
+  regulatory and privacy roles are `legal`, security roles are `it-security`,
+  and so on. Only product and technical programs stay `product`, so a
+  compliance program manager no longer outranks actual PMs on a product
+  search (#57, #60).
+- The landing page's version pill is checked against `package.json` by the
+  test suite and updated by the release checklist, so
+  `hirefrank.com/network-jobs` cannot silently serve a stale version (#61,
+  #62).
 - `INVENTORY.md` no longer duplicates **`Listings`** and **`Pagination`** when
   a triage dir came from the `stage-company.sh` skeleton. The helpers patch the
   skeleton's header placeholders *and* write the Pipeline summary block, so the
