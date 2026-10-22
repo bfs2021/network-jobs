@@ -3435,6 +3435,20 @@ class AgentBrowserVersionFloorTests(unittest.TestCase):
             env={"PATH": f"{bin_dir}:{os.environ['PATH']}"})
         self.assertEqual(proc.stdout.strip(), "0.38.1")
 
+    def test_describe_version(self):
+        cases = [
+            ("0.39.1", "0.39.1", "0.39.1"),          # at floor
+            ("0.40.0", "0.39.1", "0.40.0"),          # above floor
+            ("0.38.1", "0.39.1", "0.38.1 < 0.39.1"),  # below floor
+            ("", "0.39.1", "unknown"),               # absent/unparseable
+            ("0.39.1", "", "0.39.1"),                # no floor declared
+        ]
+        for have, floor, expected in cases:
+            proc = self._bash(
+                f'source "{ROOT}/lib/browser.sh"; ab_describe_version "{have}" "{floor}"')
+            self.assertEqual(proc.stdout.strip(), expected,
+                             f"describe({have!r}, {floor!r})")
+
     @unittest.skipUnless(
         all(shutil.which(t) for t in ("jq", "curl", "unzip")),
         "doctor requires jq/curl/unzip")
@@ -3470,6 +3484,36 @@ class AgentBrowserVersionFloorTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("agent-browser 0.38.1 < 0.39.1", proc.stdout)
         self.assertIn("network-jobs update", proc.stdout)
+
+    def test_setup_install_path_verifies_what_landed(self):
+        # A stale registry mirror or proxy can serve a build below the floor;
+        # setup must not report "installed" without checking the result.
+        tmp = Path(tempfile.mkdtemp(prefix="nj-ab-install-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        fake_bin = tmp / "fakebin"
+        installed_bin = tmp / "prefix" / "bin"
+        fake_bin.mkdir(parents=True)
+        installed_bin.mkdir(parents=True)
+        npm = fake_bin / "npm"
+        npm.write_text(
+            "#!/usr/bin/env bash\n"
+            'case "$1" in\n'
+            '  --version) echo 10.9.0 ;;\n'
+            '  prefix) printf "%s\\n" "$FAKE_PREFIX" ;;\n'
+            '  install) if [[ "$*" == *agent-browser* ]]; then\n'
+            '      printf \'#!/usr/bin/env bash\\necho "agent-browser 0.30.0"\\n\''
+            ' > "$FAKE_PREFIX/bin/agent-browser";\n'
+            '      chmod +x "$FAKE_PREFIX/bin/agent-browser"; fi ;;\n'
+            "esac\nexit 0\n")
+        npm.chmod(0o755)
+        proc = self._bash(
+            f'HOME="{tmp / "home"}" bash "{ROOT}/setup" --agent auto --no-launcher',
+            env={"PATH": f"{fake_bin}:{installed_bin}:/usr/bin:/bin:/usr/sbin",
+                 "NETWORK_JOBS_HOME": str(tmp / "data"),
+                 "FAKE_PREFIX": str(tmp / "prefix")})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("Installing agent-browser", proc.stdout)
+        self.assertIn("below the floor", proc.stdout)
 
 
 class InventoryPipelineTests(unittest.TestCase):

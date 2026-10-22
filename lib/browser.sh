@@ -58,3 +58,18 @@ def parts(value: str) -> tuple[int, int, int]:
 sys.exit(0 if parts(sys.argv[1]) >= parts(sys.argv[2]) else 1)
 PY
 }
+
+# One-line description of an installed version against the floor.
+# "0.39.1" when current (or no floor), "0.38.1 < 0.39.1" when below, "unknown" when absent.
+ab_describe_version() {
+  local have="${1:-}" min="${2:-}"
+  if [[ -z "$have" ]]; then
+    printf 'unknown'
+    return 0
+  fi
+  if [[ -n "$min" ]] && ! ab_version_ge "$have" "$min"; then
+    printf '%s < %s' "$have" "$min"
+  else
+    printf '%s' "$have"
+  fi
+}
