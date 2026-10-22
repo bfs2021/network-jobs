@@ -1,5 +1,35 @@
 # Changelog
 
+## v1.7.0 — 2026-10-22
+
+### Added
+- `.github/workflows/publish.yml` publishes on a version tag through npm
+  trusted publishing (OIDC): no `NPM_TOKEN`, no per-release passkey step-up,
+  and automatic provenance. It re-runs the tests and refuses to publish when
+  the tag doesn't match `package.json`. Manual publishing stays documented as
+  the fallback in `docs/RELEASE.md`.
+
+### Changed
+- Every customer-facing skill now asks structured questions through the host's
+  choice tool (`AskUserQuestion` / `question` / `ask_user_choice`), **one
+  question per call** — never a bundled prompt or a multi-question tool call.
+  Each question leads with the recommended option and a one-line reason, keeps
+  the deciding data in the option labels, and keeps a free-text path; hosts with
+  no such tool fall back to a numbered list (max 4, recommendation first).
+- Wired into all bounded decisions: setup interview (overwrite fields, track,
+  categories, deal-breakers, former-employer policy, onsite metros, next step),
+  search (first-run gates, former employers, role → location → seniority,
+  network packs), careers-discover (company batch, capture fallback, family
+  vetoes, ingest set), jobs-ingest (dir, then set), intros (role, then
+  forwarder), and import (fuzzy merges).
+- `skills/network-jobs/examples.md` Example 3 no longer demonstrates the prose
+  three-question clarification dump; it shows three sequential choice calls.
+
+### Fixed
+- `network-jobs-setup` had the "Trajectory / domain / shape" bullet duplicated
+  with contradictory detail; merged into one, keeping the `targetRoles` ↔
+  `track` reconciliation.
+
 ## v1.6.2 — 2026-10-04
 
 ### Fixed

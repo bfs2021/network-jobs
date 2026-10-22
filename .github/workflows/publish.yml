@@ -1,0 +1,52 @@
+name: publish
+
+# Publishes on an annotated/lightweight version tag, using npm trusted
+# publishing (OIDC): no NPM_TOKEN, no 2FA step-up, provenance automatic.
+# Requires a one-time trusted-publisher entry on npmjs.com — see
+# docs/RELEASE.md. Until that exists this workflow will fail at the publish
+# step (safe: nothing is published).
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # OIDC token for trusted publishing
+    steps:
+      - uses: actions/checkout@v4
+
+      # Trusted publishing needs npm >= 11.5.1; Node 24 ships 11.x.
+      # Deliberately no registry-url: setup-node would write an .npmrc with
+      # an unset ${NODE_AUTH_TOKEN}, which breaks the OIDC path.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Verify tag matches package.json
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::tag v$tag does not match package.json $pkg"
+            exit 1
+          fi
+
+      - name: Run helper test suite
+        run: bash tests/run.sh
+
+      - name: Check CLI syntax
+        run: bash -n bin/network-jobs setup lib/agents.sh
+
+      - name: Publish to npm
+        run: npm publish
