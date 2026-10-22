@@ -10,10 +10,15 @@ Failures never fail the run: undescribed jobs score exactly as before.
 from __future__ import annotations
 
 import json
+import math
+import time
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 from .matches import MatchesFormatError, load_matches, write_matches
@@ -22,6 +27,28 @@ from .text import collapse_ws
 MAX_JD_CHARS = 10000
 MAX_DOWNLOAD_BYTES = 2_000_000
 DEFAULT_TIMEOUT = 30
+MAX_RETRY_AFTER = 30.0
+# A CDN bot wall (CloudFront/SigSci) clears in about a minute, so the first
+# retries wait much longer than the 429 backoff. Beyond these, the host is
+# treated as blocked for the run rather than paying the cooldown per job.
+BOT_WALL_DELAYS = (30.0, 60.0)
+DEFAULT_MAX_TOTAL_RETRIES = 50
+DEFAULT_MAX_CONSECUTIVE_FAILURES = 5
+
+# Failures that clear on their own. `TimeoutError`/`ConnectionError` come from
+# an injected fetch; through `urlopen` the same causes arrive wrapped in a
+# `URLError`, so `_failure_name` unwraps to the reason. A bare `URLError`
+# (DNS, bad certificate), `SSLError`, `ValueError` or `InvalidURL` is a
+# property of the URL or the environment, not of the moment.
+_TRANSIENT_FAILURES = frozenset({
+    "TimeoutError",
+    "ConnectionError",
+    "ConnectionResetError",
+    "ConnectionRefusedError",
+    "ConnectionAbortedError",
+    "BrokenPipeError",
+    "RemoteDisconnected",
+})
 
 _SKIP_TAGS = frozenset({
     "script", "style", "noscript", "nav", "header", "footer",
@@ -141,8 +168,33 @@ def fetch_job_description(
                 status = getattr(resp, "status", 200) or 200
                 content_type = resp.headers.get("Content-Type", "")
                 body = resp.read(MAX_DOWNLOAD_BYTES + 1)
+    except HTTPError as exc:
+        # Keep the status so callers can tell 429/5xx (retryable) from 404,
+        # and surface Retry-After when the server sent one.
+        error: dict[str, Any] = {"error": f"http-{exc.code}"}
+        headers = getattr(exc, "headers", None)
+        retry_after = _retry_after_seconds(headers)
+        if retry_after is not None:
+            if retry_after > MAX_RETRY_AFTER:
+                # The server asked for longer than we are willing to wait.
+                # Report the cap but retry nothing: retrying at 30s would be
+                # ignoring the host's request.
+                error["retryAfter"] = MAX_RETRY_AFTER
+                error["retryAfterTooLong"] = True
+            else:
+                error["retryAfter"] = retry_after
+        if exc.code == 403 and _is_bot_wall(headers):
+            # CloudFront/SigSci blocks a burst for ~a minute and then serves
+            # the same page; a bare 403 is still a closed/private role.
+            error["botWall"] = True
+        try:
+            # HTTPError is also the response object; we never read its body.
+            exc.close()
+        except Exception:
+            pass
+        return error
     except Exception as exc:
-        return {"error": f"fetch-failed: {type(exc).__name__}"}
+        return {"error": f"fetch-failed: {_failure_name(exc)}"}
     if status and status >= 400:
         return {"error": f"http-{status}"}
     if len(body or b"") > MAX_DOWNLOAD_BYTES:
@@ -180,6 +232,225 @@ def _utcnow() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _retry_after_seconds(headers) -> float | None:
+    """`Retry-After` as non-negative seconds, else None.
+
+    Both forms the header allows are accepted: delta-seconds (integer or
+    float) and an HTTP-date. The value is **not** capped here — the caller
+    decides whether a wait that long is acceptable (over `MAX_RETRY_AFTER`
+    we skip the retry instead of retrying early). A header the server sent
+    but we cannot parse is treated as absent, so the caller falls back to
+    exponential backoff.
+    """
+    if headers is None:
+        return None
+    try:
+        raw = headers.get("Retry-After")
+    except AttributeError:
+        return None
+    if raw is None:
+        return None
+    value = str(raw).strip()
+    if not value:
+        return None
+    try:
+        seconds = float(value)
+    except ValueError:
+        seconds = None
+    if seconds is not None:
+        if math.isnan(seconds) or math.isinf(seconds):
+            return None
+        return max(seconds, 0.0)
+    try:
+        when = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    if when is None:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    delta = (when - datetime.now(timezone.utc)).total_seconds()
+    return max(delta, 0.0)
+
+
+def _is_bot_wall(headers) -> bool:
+    """True when a 403 carries a CDN bot-wall signature, not an auth denial.
+
+    CloudFront+Signal Sciences answers a burst with a 403 that has nothing to
+    do with the role: an `x-sigsci-request-id` (the SigSci marker seen in the
+    live wall), or a CloudFront-generated error page (`Server: CloudFront`
+    plus `x-cache: Error from cloudfront`). `Server: CloudFront` alone is not
+    enough — a CloudFront-fronted site can 403 a private or geo-blocked role
+    without a wall. The same URL returns 200 once the wall clears (~45s in
+    the live e2e).
+    """
+    if headers is None:
+        return False
+    try:
+        if headers.get("x-sigsci-request-id") is not None:
+            return True
+        server = str(headers.get("Server") or "").lower()
+        cache = str(headers.get("x-cache") or "").lower()
+        return "cloudfront" in server and "error from cloudfront" in cache
+    except AttributeError:
+        return False
+
+
+def _failure_name(exc: BaseException) -> str:
+    """Class name for the error string, unwrapping `URLError`'s cause.
+
+    `urlopen` wraps every `OSError` in `URLError`, which would otherwise
+    collapse "connection reset" (transient) and "name or service not known"
+    (not transient) into one non-retryable name.
+    """
+    reason = getattr(exc, "reason", None)
+    if isinstance(exc, URLError) and isinstance(reason, BaseException):
+        return type(reason).__name__
+    return type(exc).__name__
+
+
+def _is_retryable(error: str) -> bool:
+    """Transient failures worth another attempt.
+
+    Throttling (429), server errors (5xx) and a short allowlist of network
+    failures usually clear on a second try — a burst of requests gets
+    rate-limited but the same page answers moments later. Everything else
+    (other 4xx, DNS/TLS `URLError`s, non-http URLs, oversized bodies, pages
+    with no usable body) is a property of the URL, not of the moment.
+    """
+    if not error:
+        return False
+    if error == "http-429":
+        return True
+    if error.startswith("http-5") and error[len("http-"):].isdigit():
+        return True
+    if error.startswith("fetch-failed:"):
+        return error.split(":", 1)[1].strip() in _TRANSIENT_FAILURES
+    return False
+
+
+def _retry_delay(result: dict[str, Any], attempt: int, retry_delay: float) -> float:
+    """Server-requested delay for 429/503, a long CDN-wall cooldown, or backoff."""
+    error = str(result.get("error") or "")
+    retry_after = result.get("retryAfter")
+    if error in ("http-429", "http-503") and isinstance(retry_after, (int, float)):
+        return min(max(float(retry_after), 0.0), MAX_RETRY_AFTER)
+    if result.get("botWall"):
+        if isinstance(retry_after, (int, float)):
+            return min(max(float(retry_after), 0.0), MAX_RETRY_AFTER)
+        index = min(max(attempt, 0), len(BOT_WALL_DELAYS) - 1)
+        return BOT_WALL_DELAYS[index]
+    return retry_delay * (2 ** attempt)
+
+
+def _should_retry(result: dict[str, Any], *, allow_bot_wall: bool = True) -> bool:
+    """Whether this result is worth another attempt.
+
+    A 403 is retried only when it is a CDN bot wall (a bare one never clears),
+    and only while the caller still allows the long cooldown — once a host has
+    served one wall, a second wall is treated as blocked instead of retried.
+    An over-cap `Retry-After` is never retried, whatever the status.
+    """
+    if result.get("retryAfterTooLong"):
+        return False
+    if result.get("botWall"):
+        return allow_bot_wall
+    return _is_retryable(str(result.get("error") or ""))
+
+
+class _RetryBudget:
+    """Run-level guard so an all-failing board cannot multiply the load.
+
+    `max_total_retries` counts **failed** retries only: a retry that recovers
+    a row costs nothing, so a board whose first request is throttled for every
+    job — and whose retry succeeds — still fetches the whole board. The
+    consecutive counter is **per job** (a job that ends in a retryable failure
+    counts once, a success or a non-retryable error such as 404 resets it) and
+    trips a **soft stop**: the next successful job re-enables retries, so one
+    bad host does not disarm the rest of the run. Exhausting the total budget
+    is a hard stop.
+    """
+
+    def __init__(
+        self,
+        max_total_retries: int,
+        max_consecutive_failures: int,
+    ) -> None:
+        self.remaining = max(0, int(max_total_retries))
+        self.max_consecutive = max(0, int(max_consecutive_failures))
+        self.consecutive = 0
+        self.soft_tripped = False
+        self.exhausted = self.remaining == 0
+
+    @property
+    def disabled(self) -> bool:
+        """True while retries are off — the summary reports this at the end."""
+        return self.exhausted or self.soft_tripped
+
+    def allow_retries(self) -> bool:
+        return not self.disabled
+
+    def note_retry_failed(self) -> None:
+        """A retry that still produced no body spends one unit. Recovered
+        retries never call this, so they cannot starve later jobs."""
+        self.remaining -= 1
+        if self.remaining <= 0:
+            self.exhausted = True
+
+    def finish_job(self, retryable_failure: bool) -> None:
+        if retryable_failure:
+            self.consecutive += 1
+            if self.max_consecutive and self.consecutive >= self.max_consecutive:
+                self.soft_tripped = True
+        else:
+            self.consecutive = 0
+            self.soft_tripped = False
+
+
+def _describe_with_retry(
+    url: str,
+    *,
+    timeout: int,
+    fetch,
+    retries: int,
+    retry_delay: float,
+    sleep,
+    budget: _RetryBudget,
+    allow_retries: bool = True,
+    suppress_bot_wall: bool = False,
+) -> tuple[dict[str, Any], bool, bool]:
+    """Fetch one JD, retrying transient errors with backoff.
+
+    Returns the result plus whether the host answered 429 and whether it
+    served a CDN bot wall at any point, so the caller can pace (and, if the
+    wall persisted, block) the host for the rest of the run. `suppress_bot_wall`
+    turns the long wall cooldown off for a host that already showed a wall
+    once, while leaving normal 429/5xx retries available.
+    """
+    attempts = max(0, int(retries))
+    result = fetch_job_description(url, timeout=timeout, fetch=fetch)
+    saw_429 = result.get("error") == "http-429"
+    saw_bot_wall = bool(result.get("botWall"))
+    if allow_retries:
+        attempt = 0
+        while True:
+            retryable = _should_retry(
+                result, allow_bot_wall=not suppress_bot_wall)
+            if not retryable or attempt >= attempts or not budget.allow_retries():
+                break
+            sleep(_retry_delay(result, attempt, retry_delay))
+            attempt += 1
+            result = fetch_job_description(url, timeout=timeout, fetch=fetch)
+            saw_429 = saw_429 or result.get("error") == "http-429"
+            saw_bot_wall = saw_bot_wall or bool(result.get("botWall"))
+            if "error" in result:
+                # Only a retry that did not recover the row costs budget.
+                budget.note_retry_failed()
+        budget.finish_job(
+            _should_retry(result, allow_bot_wall=not suppress_bot_wall))
+    return result, saw_429, saw_bot_wall
+
+
 def fetch_descriptions(
     triage_dir: str | Path,
     *,
@@ -187,9 +458,33 @@ def fetch_descriptions(
     timeout: int = DEFAULT_TIMEOUT,
     max_chars: int = MAX_JD_CHARS,
     fetch=None,
+    retries: int = 2,
+    retry_delay: float = 1.0,
+    host_delay: float = 1.0,
+    max_total_retries: int = DEFAULT_MAX_TOTAL_RETRIES,
+    max_consecutive_failures: int = DEFAULT_MAX_CONSECUTIVE_FAILURES,
+    sleep=time.sleep,
 ) -> dict[str, Any]:
     """Fill `description` for staged jobs in place. Never raises for fetch
     failures — they land in `failed` and the run continues.
+
+    Transient errors (429, 5xx, network/timeout) get up to `retries` extra
+    attempts; a 429/503 honours the server's `Retry-After` (capped at
+    `MAX_RETRY_AFTER`) instead of the `retry_delay * 2**attempt` backoff.
+    A 403 that carries a CDN bot-wall signature (`x-sigsci-request-id`, or
+    `Server: CloudFront` with a CloudFront error cache) is retried after
+    `BOT_WALL_DELAYS` — a bare 403 is not. Once a host answers 429 or serves
+    a bot wall, the next job on that host waits `host_delay` first. A host
+    that serves a second wall is blocked instead of paying the cooldowns
+    again: later jobs get one attempt each and the summary carries
+    `botWalled: true`. `sleep` is injectable so tests stay instant.
+
+    The run-level budget only charges **failed** retries, so a board whose
+    retry recovers every row fetches the whole board. `max_consecutive_failures`
+    counts failing jobs and trips a soft stop that the next success clears,
+    while exhausting `max_total_retries` is a hard stop; either way a down
+    board falls back to one request per row. The summary carries an additive
+    `retriesDisabled: true` only when retries are still off at the end.
 
     `matches.json` keeps its documented object shape (#32): the wrapper and
     its summary keys are read through `load_matches` and written back through
@@ -223,6 +518,10 @@ def fetch_descriptions(
                     "errors": ["unexpected shape"], "out": str(path)}
     fetched = skipped = failed = 0
     errors: list[str] = []
+    budget = _RetryBudget(max_total_retries, max_consecutive_failures)
+    throttled_hosts: set[str] = set()
+    walled_hosts: set[str] = set()
+    blocked_hosts: set[str] = set()
     for job in jobs:
         if not isinstance(job, dict):
             skipped += 1
@@ -231,7 +530,26 @@ def fetch_descriptions(
             skipped += 1
             continue
         url = str(job.get("url") or "")
-        result = fetch_job_description(url, timeout=timeout, fetch=fetch)
+        # A host that just answered 429 (or served a bot wall) gets a pause
+        # before the next job, whether or not the retried request succeeded.
+        host = urlsplit(url).netloc
+        if host and host in throttled_hosts:
+            sleep(host_delay)
+        result, saw_429, saw_bot_wall = _describe_with_retry(
+            url, timeout=timeout, fetch=fetch, retries=retries,
+            retry_delay=retry_delay, sleep=sleep, budget=budget,
+            allow_retries=host not in blocked_hosts,
+            # A recovered wall is not a licence to pay 30s again per job; a
+            # second wall on the same host is treated as blocked instead.
+            suppress_bot_wall=host in walled_hosts)
+        if host and (saw_429 or saw_bot_wall):
+            throttled_hosts.add(host)
+        if host and saw_bot_wall:
+            walled_hosts.add(host)
+        if host and result.get("botWall"):
+            # The wall is still up (or came back): fail fast on this host
+            # rather than paying the cooldown again for every remaining row.
+            blocked_hosts.add(host)
         if "error" in result:
             failed += 1
             if len(errors) < 5:
@@ -251,5 +569,11 @@ def fetch_descriptions(
         write_matches(path, envelope)
     else:
         path.write_text(json.dumps(jobs, indent=2, ensure_ascii=False) + "\n")
-    return {"fetched": fetched, "skipped": skipped, "failed": failed,
-            "errors": errors, "out": str(path)}
+    summary: dict[str, Any] = {
+        "fetched": fetched, "skipped": skipped, "failed": failed,
+        "errors": errors, "out": str(path)}
+    if budget.disabled:
+        summary["retriesDisabled"] = True
+    if blocked_hosts:
+        summary["botWalled"] = True
+    return summary
