@@ -63,6 +63,47 @@ TITLE_CATEGORY_PATTERNS: list[tuple[str, str]] = [
     (r"\b(salesperson|sales )\b", "sales"),
 ]
 
+# A title may name the team/domain the role sits in after a dash, pipe or
+# comma: "Incident Response Manager - Product & Engineering". That qualifier
+# is not the role, so category matching for bare words looks at the head
+# segment only (#31).
+TITLE_QUALIFIER_RE = re.compile(r"\s+[-\u2013\u2014]\s*|\s*[-\u2013\u2014]\s+|\s*[|;]\s*|,\s+")
+
+# "product" names a product role only when it is the role's function: it
+# modifies a role noun ("Product Manager", "Product Strategy") or a leader
+# owns the function ("Head of Product", "VP, Product"). A title that merely
+# contains the word ("New Product Introduction ... Sourcing Manager",
+# "Incident Response Manager - Product & Engineering") is not a product role —
+# there the word describes the product/org, not the job.
+PRODUCT_ROLE_RE = re.compile(
+    r"\bproduct\s+(manager|management|lead|owner|ops|operations|strategy|"
+    r"program|portfolio|planning|partnerships?)\b"
+    r"|\bchief product officer\b",
+    re.I,
+)
+PRODUCT_LEADER_RE = re.compile(
+    r"\b(head|director|vp|vice president|svp|evp|avp|chief|gm|general manager)"
+    r"\b(?:\s+of)?[\s,]+product\b",
+    re.I,
+)
+# Level-only titles ("Manager", "Senior Director", "VP") carry no domain, so a
+# comma qualifier supplies the function: "Manager, Product Program
+# Management" reads as "Manager of Product Program Management".
+BARE_ROLE_RE = re.compile(
+    r"^(?:(?:senior|sr\.?|staff|principal|lead|group|chief|associate|junior|"
+    r"jr\.?|executive|deputy|assistant|interim|acting|vice president|vp|svp|"
+    r"evp|avp|head|director|manager|gm|general manager)\s*)+$",
+    re.I,
+)
+BARE_LEADER_RE = re.compile(
+    r"^(?:senior\s+|staff\s+|principal\s+|group\s+)?(?:vice president|vp|svp|"
+    r"evp|avp|head|director|chief|gm|general manager|executive|deputy|"
+    r"interim|acting)\s*$",
+    re.I,
+)
+PRODUCT_QUALIFIER_RE = re.compile(r"^product\b", re.I)
+
+
 DEPT_CATEGORY = [
     (r"\b(machine learning|artificial intelligence|\bai\b|\bml\b)\b", "ai-ml"),
     (r"\b(data|analytics|business intelligence|\bbi\b)\b", "data"),
@@ -109,6 +150,35 @@ SENIOR_RE = re.compile(
     re.I,
 )
 JUNIOR_RE = re.compile(r"\b(junior|associate|entry[-\s]?level)\b", re.I)
+
+
+def title_head(title: str) -> tuple[str, list[str]]:
+    """Split a title into its head segment and trailing qualifiers."""
+    parts = TITLE_QUALIFIER_RE.split(collapse_ws(title or ""))
+    segments = [s.strip() for s in parts if s.strip()]
+    if not segments:
+        return "", []
+    return segments[0], segments[1:]
+
+
+def is_product_function_title(title: str) -> bool:
+    """True only when "product" names the role's function, not a qualifier."""
+    head, qualifiers = title_head(title)
+    if not head:
+        return False
+    if PRODUCT_ROLE_RE.search(head) or PRODUCT_LEADER_RE.search(head):
+        return True
+    if not qualifiers:
+        return False
+    # "VP, Product" / "Manager, Product Program Management": the qualifier is
+    # the function because the head is only a level + generic role word.
+    if BARE_ROLE_RE.match(head):
+        combined = " ".join([head, *qualifiers])
+        if PRODUCT_ROLE_RE.search(combined) or PRODUCT_LEADER_RE.search(combined):
+            return True
+    if BARE_LEADER_RE.match(head):
+        return bool(PRODUCT_QUALIFIER_RE.search(qualifiers[0]))
+    return False
 
 
 def _match_table(text: str, table: list[tuple[str, str]]) -> tuple[str | None, str | None]:
@@ -168,13 +238,18 @@ def classify_category(title: str, department: str = "") -> tuple[str, str, bool]
     cat, _ = _match_table(title, TITLE_CATEGORY_PATTERNS)
     if cat:
         return cat, "high", False
+    # "product" is only a title signal when it is the role's function (#31);
+    # a bare token ("New Product Introduction ...") no longer decides.
+    if is_product_function_title(title):
+        return "product", "high", False
     cat, _ = _match_table(department, DEPT_CATEGORY)
     if cat:
         return cat, "high", False
-    # Weak title tokens
-    tokens = set(tokenize(f"{title} {department}"))
+    # Weak title tokens. Only the head segment counts: a trailing qualifier
+    # ("... - Product & Engineering") names the team, not the job.
+    head, _ = title_head(title)
+    tokens = set(tokenize(f"{head} {department}"))
     weak = {
-        "product": "product",
         "design": "design",
         "data": "data",
         "sales": "sales",

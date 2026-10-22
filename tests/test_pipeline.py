@@ -757,6 +757,70 @@ class ClassifierLocationTests(unittest.TestCase):
         self.assertEqual(rc, 1)
 
 
+class ProductTitleClassificationTests(unittest.TestCase):
+    """#31: "product" must be the role's function, not a word in the title."""
+
+    GENUINE = [
+        "Senior Product Manager, Growth",
+        "Head of Product",
+        "Principal Product Manager",
+        "VP, Product",
+        "Director of Product Management",
+        "Group Product Manager",
+        "Manager, Product Program Management",
+    ]
+
+    def _category(self, title):
+        from network_jobs.classify import classify_job
+
+        return classify_job({"title": title, "location": "Remote"})
+
+    def test_sourcing_and_incident_response_are_not_product(self):
+        for title in (
+            "New Product Introduction (NPI) Sourcing Manager, Data Center Power & Cooling",
+            "Incident Response Manager - Product & Engineering",
+        ):
+            out = self._category(title)
+            self.assertNotEqual(out["category"], "product", title)
+            self.assertIn(out["category"], ("operations", "other"), title)
+            self.assertEqual(out["categoryConfidence"], "low", title)
+            self.assertTrue(out["needsLlm"], title)
+
+    def test_genuine_product_titles_stay_high_confidence(self):
+        for title in self.GENUINE:
+            out = self._category(title)
+            self.assertEqual(out["category"], "product", title)
+            self.assertEqual(out["categoryConfidence"], "high", title)
+
+    def test_product_in_trailing_qualifier_does_not_match(self):
+        for title in (
+            "Facilities Manager - Product",
+            "Facilities Manager \u2014 Product",
+            "Facilities Manager | Product",
+            "Warehouse Manager, Product",
+        ):
+            out = self._category(title)
+            self.assertNotEqual(out["category"], "product", title)
+
+    def test_bare_product_word_is_not_a_category_signal(self):
+        # No weak product fallback remains, so a title that only mentions the
+        # word cannot claim the category (and its +5) on a guess.
+        out = self._category("Product Wizard")
+        self.assertEqual(out["category"], "other")
+        self.assertEqual(out["categoryConfidence"], "low")
+        self.assertTrue(out["needsLlm"])
+
+    def test_other_weak_tokens_remain_low_confidence(self):
+        # The remaining bare-token fallbacks still emit low confidence, so
+        # score_job reports category-unconfirmed instead of a silent bonus.
+        from network_jobs.prefs import score_job
+
+        out = score_job({"title": "Data Wizard", "company": "Acme",
+                         "location": "Remote"}, {"categories": ["product"]})
+        self.assertIn("category-unconfirmed", out["matchReasons"])
+        self.assertNotIn("category-affinity", out["matchReasons"])
+
+
 class CrawlAndIntroTests(unittest.TestCase):
     def test_intro_role_filters(self):
         from network_jobs.intros import filter_jobs
