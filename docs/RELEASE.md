@@ -4,12 +4,18 @@
 
 1. Bump `version` in `package.json` (use the edit tool — never `npm version`,
    which auto-commits and auto-tags).
-2. Add a `CHANGELOG.md` entry.
-3. Run `bash tests/run.sh` (must exit 0) and
+2. Update the version pill in `site/public/index.html` to match — the literal
+   `<span class="pill">vX.Y.Z · MIT</span>`. The page is static (no build step),
+   so nothing derives it from `package.json`, and `bash tests/run.sh` fails when
+   the two disagree. Merging to `main` deploys the page via Workers Builds, but
+   only when the push touches `site/**`; a release that bumps `package.json`
+   alone leaves the live page stale.
+3. Add a `CHANGELOG.md` entry.
+4. Run `bash tests/run.sh` (must exit 0) and
    `bash -n bin/network-jobs setup lib/agents.sh`. CI repeats both on the tag,
    but catching it locally avoids a failed release.
-4. Commit `main`.
-5. Tag and push (tags are lightweight, so `--follow-tags` would skip them):
+5. Commit `main`.
+6. Tag and push (tags are lightweight, so `--follow-tags` would skip them):
 
    ```bash
    git tag vX.Y.Z
@@ -19,7 +25,7 @@
 
    The tag triggers [`.github/workflows/publish.yml`](../.github/workflows/publish.yml),
    which re-runs the tests, checks the CLI syntax, then publishes.
-6. Watch the run, then confirm:
+7. Watch the run, then confirm:
 
    ```bash
    npm view @hirefrank/network-jobs version
@@ -34,8 +40,11 @@
    packument's `dist-tags` still points at the previous release, and `npm view`
    may serve a cached packument. Re-check with `npm view --prefer-online`, or
    read `dist-tags` and `time` straight from
-   `https://registry.npmjs.org/@hirefrank%2fnetwork-jobs`. The website converges
-   on its own schedule.
+   `https://registry.npmjs.org/@hirefrank%2fnetwork-jobs`. The npmjs.com package
+   page converges on its own schedule. `hirefrank.com/network-jobs` does not: it
+   is a static deploy of `site/public/index.html`, updated only by checklist
+   step 2 and redeployed by Workers Builds when a push to `main` touches
+   `site/**`.
 
 The workflow refuses to publish when the tag doesn't match `package.json`, so a
 mistyped tag fails before anything ships.
