@@ -3157,6 +3157,34 @@ class DemoCommandTests(unittest.TestCase):
         self.assertIn("category-affinity", text)
 
 
+class SiteVersionTests(unittest.TestCase):
+    """The landing page has no build step, so its version pill is hand-edited.
+
+    It must track package.json: a stale pill is invisible to every other test.
+    """
+
+    def test_landing_page_pill_matches_package_version(self):
+        import re
+
+        version = json.loads((ROOT / "package.json").read_text())["version"]
+        page = (ROOT / "site" / "public" / "index.html").read_text()
+        expected = f"v{version} · MIT"
+
+        pills = re.findall(r"v\d+\.\d+\.\d+ · MIT", page)
+        self.assertEqual(
+            pills.count(expected),
+            1,
+            f"site/public/index.html must show the {expected} pill exactly once; "
+            f"found {pills!r}. Update the pill when bumping package.json.",
+        )
+        self.assertEqual(
+            pills,
+            [expected],
+            f"site/public/index.html has a stale version pill: found {pills!r}, "
+            f"expected only {expected!r}.",
+        )
+
+
 class EmbeddingsTests(unittest.TestCase):
     def setUp(self):
         from network_jobs import embeddings as emb
