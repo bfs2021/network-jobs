@@ -218,7 +218,7 @@ Written by `careers-discover/helpers/paginate-listings.py` when a jobs JSON/API 
 }
 ```
 
-`status` is `complete` (clean crawl), `truncated` (page/listing cap hit) or `blocked` (zero listings captured — the board could not be read, **not** “no openings”). It is additive: `complete` / `truncated` keep their existing meaning and remain the rule for expiry. Also copied into the INVENTORY `Pagination:` line and surfaced as the header `Status:` field. **`complete` is false** when the cap truncated the crawl or a next-page signal remained. Ingest must **not** expire unseen jobs unless `complete` is true.
+`status` is `complete` (clean crawl), `truncated` (page/listing cap hit with rows captured), `empty` (clean, parsed board with **zero** roles — every role closed; expiry allowed), `blocked` (the fetch failed or nothing parseable came back — **not** “no openings”) or `captured` (a `paginate --input` run over a user-saved page — never the whole board). It is additive: `complete` / `truncated` keep their existing meaning and remain the rule for expiry. Also copied into the INVENTORY `Pagination:` line and surfaced as the header `Status:` field. **`complete` is false** when the cap truncated the crawl, a next-page signal remained, the board could not be read (a dead URL writes `blocked` with zero rows), or the rows came from a user capture (`captured`). Ingest must **not** expire unseen jobs unless `complete` is true **and** `status` is neither `blocked` nor `captured`; `empty` may expire (`complete` is true, so `--expect-count 0` works).
 
 ### index/matches.json
 

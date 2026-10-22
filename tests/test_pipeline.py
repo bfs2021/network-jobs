@@ -694,6 +694,81 @@ class FingerprintExpiryTests(unittest.TestCase):
         self.assertFalse(info["expirySkipped"])
         self.assertEqual(info["expired"], 1)
 
+    def test_expiry_refused_for_blocked_and_captured_status(self):
+        # #39: blocked (unreadable) and captured (user-saved page) are never
+        # evidence a role closed — even when the model passes
+        # --pagination-complete, and even with force_expire.
+        from network_jobs.corpus import merge_jobs
+
+        existing = [
+            self._job(externalId="1", url="https://fatboard.example/jobs/1"),
+            self._job(title="Staff Engineer", externalId="2",
+                      url="https://fatboard.example/jobs/2"),
+        ]
+        incoming = [self._job(externalId="1", url="https://fatboard.example/jobs/1")]
+        for status in ("blocked", "captured"):
+            with self.subTest(status=status):
+                merged, info = merge_jobs(
+                    existing, incoming, expire_company="FatBoard",
+                    pagination_complete=True, pagination_status=status,
+                    expected_total=1)
+                self.assertTrue(info["expirySkipped"])
+                self.assertEqual(info["expired"], 0)
+                self.assertIn(status, info["expiryReason"])
+                statuses = {j["externalId"]: j.get("status", "open") for j in merged}
+                self.assertEqual(statuses["2"], "open")
+                # force_expire is for filtered batches, not for unreadable
+                # boards or single-page captures.
+                merged, info = merge_jobs(
+                    existing, incoming, expire_company="FatBoard",
+                    pagination_complete=True, pagination_status=status,
+                    expected_total=9, force_expire=True)
+                self.assertEqual(info["expired"], 0)
+
+    def test_expiry_proceeds_for_empty_parsed_board(self):
+        # #39: a clean board with zero roles must be able to expire the old
+        # corpus rows (--pagination-complete --expect-count 0).
+        from network_jobs.corpus import merge_jobs
+
+        existing = [
+            self._job(externalId="1", url="https://fatboard.example/jobs/1"),
+            self._job(title="Staff Engineer", externalId="2",
+                      url="https://fatboard.example/jobs/2"),
+        ]
+        merged, info = merge_jobs(
+            existing, [], expire_company="FatBoard", pagination_complete=True,
+            pagination_status="empty", expected_total=0)
+        self.assertFalse(info["expirySkipped"])
+        self.assertEqual(info["expired"], 2)
+        self.assertEqual({j.get("status") for j in merged}, {"closed"})
+
+        # A normal complete crawl is unchanged.
+        merged, info = merge_jobs(
+            existing, [self._job(externalId="1",
+                                 url="https://fatboard.example/jobs/1")],
+            expire_company="FatBoard", pagination_complete=True,
+            pagination_status="complete", expected_total=1)
+        self.assertFalse(info["expirySkipped"])
+        self.assertEqual(info["expired"], 1)
+
+    def test_rebuild_records_pagination_status(self):
+        from network_jobs.corpus import rebuild
+
+        existing = [self._job(externalId="keep"),
+                    self._job(title="Old Role", externalId="gone",
+                              url="https://x/gone")]
+        (self.corpus / "jobs-all.json").write_text(json.dumps(existing) + "\n")
+        batch = self.tmp / "batch.json"
+        batch.write_text(json.dumps([self._job(externalId="keep")]) + "\n")
+        summary = rebuild(batch, self.corpus, expire_company="FatBoard",
+                          pagination_complete=True, pagination_status="captured")
+        self.assertFalse(summary["expired"])
+        self.assertEqual(summary["expiredCount"], 0)
+        self.assertTrue(summary["expirySkipped"])
+        self.assertEqual(summary["paginationStatus"], "captured")
+        jobs = json.loads((self.corpus / "jobs-all.json").read_text())
+        self.assertEqual([j for j in jobs if j.get("status") == "closed"], [])
+
     def test_rebuild_helper_honors_complete_flag(self):
         from network_jobs.corpus import rebuild
 
@@ -3460,13 +3535,16 @@ class InventoryPipelineTests(unittest.TestCase):
         self.assertNotIn("(fill)", header["Careers URL"])
         self.assertIn("Status", header)
         self.assertEqual(header["Status"], pagination["status"])
-        self.assertEqual(header["Status"], "complete")
+        # The rows came from `paginate --input`, so the helper stamps a user
+        # capture, never a complete crawl (#39).
+        self.assertEqual(header["Status"], "captured")
+        self.assertFalse(pagination["complete"])
         self.assertIn(f"complete={str(pagination['complete']).lower()}",
                       header["Pagination"])
         # The human summary block agrees with the header.
         self.assertIn("- **Listings:** 2", inventory)
 
-    def test_pagination_status_complete_truncated_blocked(self):
+    def test_pagination_status_matrix(self):
         import re
 
         from network_jobs.pagination import paginate, write_pagination
@@ -3484,29 +3562,34 @@ class InventoryPipelineTests(unittest.TestCase):
             )
             return triage
 
-        def status_of(triage: Path) -> str:
+        def staged(label: str, result: dict) -> dict:
+            triage = triage_for(label)
+            write_pagination(triage, result, company=label.title())
             pag = json.loads((triage / "index" / "pagination.json").read_text())
-            inv = (triage / "INVENTORY.md").read_text()
-            header = self._header(inv)
+            header = self._header((triage / "INVENTORY.md").read_text())
             self.assertEqual(pag["status"], header["Status"])
             self.assertEqual(int(header["Listings"]),
                              len(json.loads((triage / "index" / "listings.json").read_text())))
-            self.assertTrue(re.match(r"^pages=\d+, complete=(true|false), ",
+            # FIX 4: the Pagination line mirrors the same machine-readable state.
+            self.assertTrue(re.match(r"^pages=\d+, complete=(true|false), "
+                                     r"truncated=(true|false), status=",
                                      header["Pagination"]))
-            return pag["status"]
+            self.assertIn(f"status={pag['status']}", header["Pagination"])
+            self.assertIn(f"complete={str(pag['complete']).lower()}",
+                          header["Pagination"])
+            return pag
 
-        # complete: clean crawl.
-        clean = triage_for("clean")
+        # complete: clean crawl with rows.
         result = paginate(None, payload=[
             {"title": "Engineer", "url": "https://example.com/jobs/1",
              "location": "Remote", "sourceUrl": "https://example.com/careers"},
         ])
         self.assertEqual(result["pagination"]["status"], "complete")
-        write_pagination(clean, result, company="Clean")
-        self.assertEqual(status_of(clean), "complete")
+        self.assertTrue(result["pagination"]["complete"])
+        pag = staged("clean", result)
+        self.assertEqual(pag["status"], "complete")
 
         # truncated: page cap hit with rows captured.
-        capped = triage_for("capped")
         jobs = [{"title": f"Engineer {i}", "url": f"https://example.com/jobs/{i}",
                  "location": "Remote"} for i in range(60)]
         payload = {"jobs": jobs}
@@ -3518,19 +3601,128 @@ class InventoryPipelineTests(unittest.TestCase):
                           max_pages=1, page_size=50)
         self.assertTrue(result["pagination"]["truncated"])
         self.assertEqual(result["pagination"]["status"], "truncated")
-        write_pagination(capped, result, company="Capped")
-        self.assertEqual(status_of(capped), "truncated")
+        self.assertFalse(result["pagination"]["complete"])
+        pag = staged("capped", result)
+        self.assertEqual(pag["status"], "truncated")
 
-        # blocked: zero listings captured is a readability failure, not a
-        # company with no openings.
-        blocked = triage_for("blocked")
-        result = paginate(None, payload=[])
+        # empty: a clean 200 with a parsed, empty board means every role closed.
+        # `complete` stays true so `--expect-count 0` can expire the old rows.
+        empty_payload = {"jobs": [], "total": 0}
+
+        def empty_fetch(url):
+            return empty_payload, 200, json.dumps(empty_payload).encode()
+
+        result = paginate("https://example.com/api/jobs", fetch=empty_fetch)
         self.assertEqual(result["listings"], [])
+        self.assertEqual(result["pagination"]["status"], "empty")
+        self.assertTrue(result["pagination"]["complete"])
+        self.assertFalse(result["pagination"]["truncated"])
+        pag = staged("empty", result)
+        self.assertEqual(pag["status"], "empty")
+
+        # blocked: nothing parseable came back. Neither an unparseable body nor
+        # a JSON object without a job list is evidence the company has no roles.
+        result = paginate(None, payload=None)
         self.assertEqual(result["pagination"]["status"], "blocked")
-        write_pagination(blocked, result, company="Blocked")
-        self.assertEqual(status_of(blocked), "blocked")
-        self.assertEqual(self._header((blocked / "INVENTORY.md").read_text())["Status"],
-                         "blocked")
+        self.assertFalse(result["pagination"]["complete"])
+        self.assertEqual(staged("blocked-body", result)["status"], "blocked")
+
+        result = paginate(None, payload={"error": "forbidden", "html": "<html>"})
+        self.assertEqual(result["pagination"]["status"], "blocked")
+        self.assertEqual(staged("blocked-shape", result)["status"], "blocked")
+
+        # blocked: the fetch itself failed (dead URL / refused connection).
+        # `paginate()` still raises so `refresh` keeps its error reporting; the
+        # `paginate` CLI records this shape instead of crashing.
+        from network_jobs.pagination import blocked_result
+
+        result = blocked_result("https://example.com/api/jobs",
+                                "URLError: connection refused")
+        self.assertEqual(result["pagination"]["status"], "blocked")
+        self.assertFalse(result["pagination"]["complete"])
+        self.assertEqual(result["fetchLog"][0]["disposition"], "error")
+        self.assertEqual(staged("blocked-fetch", result)["status"], "blocked")
+
+        # captured: a `paginate --input` run is a saved page, never a crawl —
+        # complete is false so ingest cannot expire the rest of the board.
+        result = paginate(None, payload=[
+            {"title": "Engineer", "url": "https://example.com/jobs/1",
+             "location": "Remote"},
+        ], capture=True)
+        self.assertEqual(result["pagination"]["status"], "captured")
+        self.assertFalse(result["pagination"]["complete"])
+        pag = staged("captured", result)
+        self.assertEqual(pag["status"], "captured")
+        self.assertFalse(pag["complete"])
+
+        # A capture that yielded no row is a failed read, not an empty board.
+        result = paginate(None, payload=[], capture=True)
+        self.assertEqual(result["pagination"]["status"], "blocked")
+        self.assertFalse(result["pagination"]["complete"])
+
+    def test_paginate_input_cli_records_captured(self):
+        import io
+        from contextlib import redirect_stdout
+
+        tmp = Path(tempfile.mkdtemp(prefix="nj-capture-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        capture = tmp / "capture.json"
+        capture.write_text(json.dumps([
+            {"title": "Engineer", "url": "https://example.com/jobs/1",
+             "location": "Remote"},
+        ]))
+        triage = tmp / "triage"
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = helper_main(["paginate", "--input", str(capture),
+                              "--triage-dir", str(triage), "--company", "Gated Co"])
+        self.assertEqual(rc, 0)
+        payload = json.loads(out.getvalue())
+        self.assertEqual(payload["status"], "captured")
+        self.assertFalse(payload["complete"])
+        pag = json.loads((triage / "index" / "pagination.json").read_text())
+        self.assertEqual(pag["status"], "captured")
+        self.assertFalse(pag["complete"])
+        header = self._header((triage / "INVENTORY.md").read_text())
+        self.assertEqual(header["Status"], "captured")
+        self.assertIn("status=captured", header["Pagination"])
+
+    def test_paginate_cli_records_blocked_when_fetch_fails(self):
+        import io
+        from contextlib import redirect_stdout
+        from urllib.error import URLError
+
+        import network_jobs.pagination as pag_mod
+
+        tmp = Path(tempfile.mkdtemp(prefix="nj-dead-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        triage = tmp / "triage"
+
+        def dead(url, timeout=60):
+            raise URLError("connection refused")
+
+        real = pag_mod.fetch_json
+        pag_mod.fetch_json = dead
+        out = io.StringIO()
+        try:
+            with redirect_stdout(out):
+                rc = helper_main(["paginate", "--url", "https://example.com/dead",
+                                  "--triage-dir", str(triage), "--company", "Dead Co"])
+        finally:
+            pag_mod.fetch_json = real
+        self.assertEqual(rc, 0)
+        payload = json.loads(out.getvalue())
+        self.assertEqual(payload["status"], "blocked")
+        self.assertFalse(payload["complete"])
+        pag = json.loads((triage / "index" / "pagination.json").read_text())
+        self.assertEqual(pag["status"], "blocked")
+        # Nothing captured is not an empty board: ingest must not expire it.
+        self.assertEqual(json.loads((triage / "index" / "listings.json").read_text()), [])
+        header = self._header((triage / "INVENTORY.md").read_text())
+        self.assertEqual(header["Status"], "blocked")
+        logs = list((triage / "fetch-log").glob("*.json"))
+        self.assertEqual(len(logs), 1)
+        self.assertEqual(json.loads(logs[0].read_text())["disposition"], "error")
 
     def test_fetch_descriptions_accepts_company_flag(self):
         import io
@@ -3614,6 +3806,20 @@ class SkillDocConsistencyTests(unittest.TestCase):
         self.assertIn("--input", text)
         self.assertIn("status: blocked", text)
         self.assertIn("Never invent", text)
+        # #39: the capture caveat is machine-readable, not an INVENTORY note.
+        self.assertIn("complete: false", text)
+        self.assertIn('status: "captured"', text)
+        self.assertIn("status: empty", text)
+
+    def test_jobs_ingest_never_expires_captured_or_blocked(self):
+        text = (ROOT / "skills" / "jobs-ingest" / "SKILL.md").read_text()
+        # #39: expiry rule names captured alongside blocked, and allows empty.
+        self.assertIn("never", text)
+        self.assertIn("user-capture", text)
+        self.assertIn("`captured`", text)
+        self.assertIn("`blocked`", text)
+        self.assertIn("status: empty", text)
+        self.assertIn("--pagination-status", text)
 
 
 if __name__ == "__main__":

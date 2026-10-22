@@ -13,7 +13,10 @@ MARKER_END = "<!-- nj-summary:end -->"
 # Header fields the helpers own. They must agree with index/*.json, so they
 # are patched by code rather than left to the model (see #33).
 HEADER_FIELDS = ("Listings", "Careers URL", "Pagination", "Status")
-CRAWL_STATUSES = ("complete", "truncated", "blocked")
+CRAWL_STATUSES = ("complete", "truncated", "empty", "blocked", "captured")
+# Statuses that are not evidence a role closed: an unreadable board and a
+# user-supplied capture both say nothing about the rest of the board (#39).
+NO_EXPIRY_STATUSES = ("blocked", "captured")
 
 _HEADER_FIELD_RE = re.compile(r"^- \*\*[^*\n]+:\*\*[^\n]*(?:\n|$)", re.M)
 
@@ -32,11 +35,12 @@ def careers_url_from_listings(listings: Any, fallback: str = "") -> str:
 
 
 def crawl_status(pagination: Any, n_listings: Any) -> str:
-    """complete | truncated | blocked, derived from the crawl result.
+    """complete | truncated | empty | blocked | captured, from the crawl result.
 
-    `blocked` means no listing was captured — the board could not be read, not
-    that the company has no openings. Back-compat: `complete`/`truncated`
-    stay the source of truth; `status` is additive.
+    `blocked` means nothing parseable came back; `empty` means a clean, parsed
+    board with zero rows (every role closed); `captured` means the rows came
+    from a user save, not a crawl. Back-compat: `complete`/`truncated` stay the
+    source of truth; `status` is additive.
     """
     pages = pagination if isinstance(pagination, dict) else {}
     status = pages.get("status")
@@ -50,6 +54,17 @@ def crawl_status(pagination: Any, n_listings: Any) -> str:
     return "complete"
 
 
+def pagination_line(pages: Any, n_listings: Any = None) -> str:
+    """The `Pagination:` line shared by the INVENTORY header and summary block."""
+    pag = pages if isinstance(pages, dict) else {}
+    return (
+        f"pages={pag.get('pages', 0)}, "
+        f"complete={'true' if pag.get('complete') else 'false'}, "
+        f"truncated={'true' if pag.get('truncated') else 'false'}, "
+        f"status={crawl_status(pag, n_listings)}"
+    )
+
+
 def _header_values(summary: dict[str, Any]) -> dict[str, str]:
     values: dict[str, str] = {}
     n_listings = summary.get("nListings", summary.get("listings"))
@@ -61,11 +76,7 @@ def _header_values(summary: dict[str, Any]) -> dict[str, str]:
         values["Careers URL"] = careers_url
     pages = summary.get("pagination")
     if isinstance(pages, dict) and pages:
-        values["Pagination"] = (
-            f"pages={pages.get('pages', 0)}, "
-            f"complete={'true' if pages.get('complete') else 'false'}, "
-            f"truncated={'true' if pages.get('truncated') else 'false'}"
-        )
+        values["Pagination"] = pagination_line(pages, n_listings)
         values["Status"] = crawl_status(pages, n_listings)
     elif has_n:
         values["Status"] = crawl_status(None, n_listings)
@@ -132,10 +143,8 @@ def render_summary_block(summary: dict[str, Any]) -> str:
     if depts:
         lines.append(f"- **Departments:** {department_histogram_line(depts)}")
     if pages:
-        complete = "true" if pages.get("complete") else "false"
-        truncated = "true" if pages.get("truncated") else "false"
         lines.append(
-            f"- **Pagination:** pages={pages.get('pages', 0)}, complete={complete}, truncated={truncated}"
+            f"- **Pagination:** {pagination_line(pages, summary.get('nListings', summary.get('listings')))}"
         )
         extra = pages.get("scheme")
         if extra:

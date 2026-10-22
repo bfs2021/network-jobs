@@ -15,7 +15,7 @@ from .fingerprint import fingerprint
 from .corpus import rebuild
 from .inventory import careers_url_from_listings, upsert_inventory, write_summary_json
 from .matches import MatchesFormatError, load_matches, normalize_matches, write_matches
-from .pagination import DEFAULT_MAX_LISTINGS, DEFAULT_MAX_PAGES, paginate, write_pagination
+from .pagination import DEFAULT_MAX_LISTINGS, DEFAULT_MAX_PAGES, blocked_result, paginate, write_pagination
 from .paths import data_home
 from .prefs import load_resume_keywords, match_listings, name_tokens
 from .rank import DEFAULT_K, posting_age_days, rank_corpus
@@ -821,14 +821,22 @@ def cmd_paginate(args: argparse.Namespace) -> int:
     if not url and payload is None:
         print("paginate requires --url or --input", file=sys.stderr)
         return 1
-    result = paginate(
-        url or None,
-        payload=payload if not url else None,
-        max_pages=args.max_pages,
-        max_listings=args.max_listings,
-        source_url=url or str(args.input or ""),
-        company=args.company or "",
-    )
+    try:
+        result = paginate(
+            url or None,
+            payload=payload if not url else None,
+            max_pages=args.max_pages,
+            max_listings=args.max_listings,
+            source_url=url or str(args.input or ""),
+            company=args.company or "",
+            # `--input` is a user capture: one saved page, never a whole crawl.
+            capture=bool(args.input and not url),
+        )
+    except OSError as exc:
+        # Dead URL / refused connection: a readable `blocked` result beats a
+        # traceback with no pagination.json (#39).
+        result = blocked_result(url or "", f"{type(exc).__name__}: {exc}",
+                                max_pages=args.max_pages)
     quiet = write_pagination(Path(args.triage_dir), result, company=args.company or "")
     _dump(quiet, args.verbose)
     return 0
@@ -844,6 +852,7 @@ def cmd_rebuild(args: argparse.Namespace) -> int:
         data / "corpus",
         expire_company=args.expire_company or None,
         pagination_complete=complete,
+        pagination_status=args.pagination_status,
         expected_total=args.expect_count,
         force_expire=args.force_expire,
     )
@@ -857,6 +866,7 @@ def cmd_rebuild(args: argparse.Namespace) -> int:
         "expiryReason": summary.get("expiryReason", ""),
         "driftWarnings": summary.get("driftWarnings", []),
         "paginationComplete": summary.get("paginationComplete", False),
+        "paginationStatus": summary.get("paginationStatus", ""),
     }, args.verbose)
     return 0
 
@@ -1248,6 +1258,8 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--expire-company", default="")
     b.add_argument("--pagination-complete", action="store_true")
     b.add_argument("--pagination-incomplete", action="store_true")
+    b.add_argument("--pagination-status", default=None,
+                   help="status from index/pagination.json: blocked/captured never expire")
     b.add_argument("--expect-count", type=int, default=None,
                    help="board listing count: skip expiry when the batch is a strict subset (filtered ingest)")
     b.add_argument("--force-expire", action="store_true",
