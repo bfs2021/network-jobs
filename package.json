@@ -1,6 +1,6 @@
 {
   "name": "@hirefrank/network-jobs",
-  "version": "1.7.0",
+  "version": "1.7.1",
   "description": "Local-first Network Jobs skill suite: LinkedIn connections \u2192 career pages \u2192 warm intros",
   "license": "MIT",
   "bin": {

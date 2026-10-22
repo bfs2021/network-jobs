@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.7.1 — 2026-10-22
+
+### Changed
+- Docs sweep after the hosted sunset: `docs/DECOMMISSION.md` and
+  `docs/hosted-d1-export.md` are gone (every checklist item was complete —
+  `hirefrank/skills` no longer carries a hosted-API skill copy). The two
+  durable facts survive in `worker/SUNSET.md`: the 2026-10-04 D1 export was
+  taken and cannot be regenerated, and there is no importer into
+  `~/.network-jobs/`.
+- `README.md` no longer surfaces the retired hosted product, matching the
+  project's own rule about not advertising `jobs.hirefrank.com` in suite docs.
+- `docs/RELEASE.md` now documents tag-triggered trusted publishing and records
+  the remaining npm publishing-access follow-up.
+
 ## v1.7.0 — 2026-10-22
 
 ### Added
