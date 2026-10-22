@@ -16,7 +16,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lib"))
 
-from network_jobs.inventory import MARKER_START  # noqa: E402
+from network_jobs.inventory import (  # noqa: E402
+    MARKER_START,
+    department_histogram_line,
+    render_summary_block,
+    upsert_inventory,
+)
 from network_jobs.prefs import match_listings, score_job  # noqa: E402
 from network_jobs.rank import rank_corpus  # noqa: E402
 from network_jobs.cli import main as helper_main  # noqa: E402
@@ -4185,9 +4190,12 @@ class InventoryPipelineTests(unittest.TestCase):
         pag = json.loads((triage / "index" / "pagination.json").read_text())
         self.assertEqual(pag["status"], "captured")
         self.assertFalse(pag["complete"])
-        header = self._header((triage / "INVENTORY.md").read_text())
+        inventory = (triage / "INVENTORY.md").read_text()
+        header = self._header(inventory)
         self.assertEqual(header["Status"], "captured")
-        self.assertIn("status=captured", header["Pagination"])
+        # A fresh file carries Pagination once, in the summary block (#55).
+        self.assertEqual(inventory.count("- **Pagination:**"), 1)
+        self.assertIn("status=captured", inventory)
 
     def test_paginate_cli_records_blocked_when_fetch_fails(self):
         import io
@@ -4242,6 +4250,107 @@ class InventoryPipelineTests(unittest.TestCase):
         payload = json.loads(out.getvalue())
         self.assertEqual(payload["company"], "Example Co")
         self.assertEqual(payload["fetched"], 0)  # no matches.json, no network
+
+
+class InventoryOutputTests(unittest.TestCase):
+    """#55: fresh INVENTORY.md shows each label once; no fake department."""
+
+    SUMMARY = {
+        "company": "Example Co",
+        "nListings": 3,
+        "nMatches": 2,
+        "careersUrl": "https://example.com/careers",
+        "pagination": {"pages": 1, "complete": True, "truncated": False,
+                       "status": "complete"},
+        "departments": {"(none)": 3},
+    }
+
+    @staticmethod
+    def _counts(text: str, labels: tuple[str, ...]) -> dict[str, int]:
+        import re
+
+        return {
+            label: len(re.findall(rf"^- \*\*{re.escape(label)}:\*\*", text, re.M))
+            for label in labels
+        }
+
+    def test_fresh_file_has_each_label_once(self):
+        tmp = Path(tempfile.mkdtemp(prefix="nj-fresh-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        path = tmp / "INVENTORY.md"
+
+        upsert_inventory(path, self.SUMMARY)
+        text = path.read_text()
+
+        counts = self._counts(
+            text, ("Listings", "Careers URL", "Pagination", "Status", "Departments")
+        )
+        self.assertEqual(set(counts.values()), {1}, counts)
+        # The documented contract still holds: every header field is present,
+        # along with the match line and the department histogram.
+        self.assertIn("- **Careers URL:** https://example.com/careers", text)
+        self.assertIn("- **Matches:** 2 of 3 match prefs", text)
+        self.assertIn("status=complete", text)
+        self.assertIn("## Pipeline summary", text)
+        # Re-running a helper patches the same file instead of re-adding the
+        # header fields the summary block already carries.
+        upsert_inventory(path, self.SUMMARY)
+        self.assertEqual(self._counts(path.read_text(), tuple(counts)), counts)
+
+    def test_existing_template_is_patched_in_place(self):
+        tmp = Path(tempfile.mkdtemp(prefix="nj-template-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        path = tmp / "INVENTORY.md"
+        path.write_text(
+            "# Careers triage — Example Co\n\n"
+            "- **Slug:** example-co\n"
+            "- **Careers URL:** (fill)\n"
+            "- **Listings:** 0\n"
+            "- **Pagination:** (pending)\n"
+            "- **Status:** (pending)\n"
+            "- **Caveats:**\n"
+        )
+
+        upsert_inventory(path, self.SUMMARY)
+        first = path.read_text()
+        self.assertIn("- **Slug:** example-co", first)
+        self.assertIn("- **Careers URL:** https://example.com/careers", first)
+        self.assertNotIn("(fill)", first)
+        head = first.split("## Pipeline summary")[0]
+        self.assertNotIn("Listings:** 0", head)
+        self.assertEqual(self._counts(head, ("Listings", "Status")),
+                         {"Listings": 1, "Status": 1})
+
+        # A second write updates the same lines; it does not append copies.
+        upsert_inventory(path, {**self.SUMMARY, "nListings": 7, "nMatches": 4})
+        second = path.read_text()
+        self.assertEqual(second.count("## Pipeline summary"), 1)
+        head = second.split("## Pipeline summary")[0]
+        self.assertEqual(self._counts(head, ("Listings", "Status")),
+                         {"Listings": 1, "Status": 1})
+        self.assertIn("- **Listings:** 7", head)
+        self.assertIn("- **Matches:** 4 of 7 match prefs", second)
+
+    def test_unknown_departments_say_so(self):
+        self.assertEqual(
+            department_histogram_line({"(none)": 679}),
+            "not provided by this board (679)",
+        )
+        self.assertIn(
+            "- **Departments:** not provided by this board (3)",
+            render_summary_block(self.SUMMARY),
+        )
+
+    def test_real_histogram_is_unchanged(self):
+        self.assertEqual(
+            department_histogram_line({"Engineering": 12, "Sales": 4, "Design": 2}),
+            "Engineering (12), Sales (4), Design (2)",
+        )
+        block = render_summary_block(
+            {**self.SUMMARY, "departments": {"Engineering": 2, "(none)": 1}}
+        )
+        self.assertIn("- **Departments:** Engineering (2), (none) (1)", block)
+        self.assertNotIn("not provided by this board", block)
 
 
 class SkillDocConsistencyTests(unittest.TestCase):

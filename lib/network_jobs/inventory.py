@@ -13,6 +13,11 @@ MARKER_END = "<!-- nj-summary:end -->"
 # Header fields the helpers own. They must agree with index/*.json, so they
 # are patched by code rather than left to the model (see #33).
 HEADER_FIELDS = ("Listings", "Careers URL", "Pagination", "Status")
+# Of those, the ones render_summary_block also emits. A fresh file must not
+# repeat them in the header, so each label appears exactly once (#55).
+SUMMARY_BLOCK_FIELDS = ("Listings", "Pagination")
+# prefs.match_listings histograms the missing `department` as this sentinel.
+UNKNOWN_DEPARTMENT = "(none)"
 CRAWL_STATUSES = ("complete", "truncated", "empty", "blocked", "captured")
 # Statuses that are not evidence a role closed: an unreadable board and a
 # user-supplied capture both say nothing about the rest of the board (#39).
@@ -106,7 +111,10 @@ def patch_inventory_header(text: str, values: dict[str, str]) -> str:
     missing = [
         label for label in HEADER_FIELDS
         if label in values
-        and not re.search(rf"^- \*\*{re.escape(label)}:\*\*", head, re.M)
+        # Search the whole file, not just the head: render_summary_block already
+        # carries Listings/Pagination, so adding those to the header would show
+        # each label twice (see the fresh-file branch in upsert_inventory).
+        and not re.search(rf"^- \*\*{re.escape(label)}:\*\*", text, re.M)
     ]
     if missing:
         block = "".join(f"- **{label}:** {values[label]}\n" for label in missing)
@@ -126,6 +134,10 @@ def department_histogram_line(departments: dict[str, int], limit: int = 12) -> s
     items = sorted(departments.items(), key=lambda kv: (-kv[1], kv[0]))[:limit]
     if not items:
         return "(none)"
+    if set(departments) == {UNKNOWN_DEPARTMENT}:
+        # Every listing lacks a department (e.g. Greenhouse). "(none) (679)"
+        # reads as a broken crawl; say the board does not provide the field.
+        return f"not provided by this board ({sum(departments.values())})"
     return ", ".join(f"{name} ({count})" for name, count in items)
 
 
@@ -181,11 +193,17 @@ def upsert_inventory(path: Path, summary: dict[str, Any]) -> None:
         path.write_text(text if text.endswith("\n") else text + "\n")
     else:
         name = summary.get("company") or "company"
-        lines = [f"# Careers triage — {name}", ""]
-        lines.extend(f"- **{label}:** {header[label]}" for label in HEADER_FIELDS if label in header)
-        if len(lines) > 2:
-            lines.append("")
-        body = "\n".join(lines) + block
+        # Only the header fields the summary block does not carry; repeating
+        # Listings/Pagination here would duplicate them (#55).
+        fields = "".join(
+            f"- **{label}:** {header[label]}\n"
+            for label in HEADER_FIELDS
+            if label in header and label not in SUMMARY_BLOCK_FIELDS
+        )
+        body = f"# Careers triage — {name}\n"
+        if fields:
+            body += "\n" + fields
+        body += "\n## Pipeline summary\n\n" + block
         path.write_text(body if body.endswith("\n") else body + "\n")
 
 
