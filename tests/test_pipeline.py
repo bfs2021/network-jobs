@@ -4573,6 +4573,25 @@ class InventoryPipelineTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(inventory.read_text(), text)
 
+    def test_zero_row_manual_extract_gets_blocked_status(self):
+        """#63: zero rows with no pagination.json is blocked, not `(pending)`."""
+        tmp = Path(tempfile.mkdtemp(prefix="nj-zero-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        data, triage = self._stage(tmp, name="Beta", slug="beta")
+        (triage / "index" / "listings.json").write_text("[]\n")
+        inventory = triage / "INVENTORY.md"
+        self.assertIn("- **Status:** (pending)", inventory.read_text())
+
+        rc = helper_main(["match-prefs", "--triage-dir", str(triage),
+                          "--data", str(data), "--company", "Beta"])
+        self.assertEqual(rc, 0)
+        text = inventory.read_text()
+        self.assertIn("- **Status:** blocked", text)
+        self.assertEqual(text.count("- **Status:**"), 1)
+        head = text.split(MARKER_START)[0]
+        self.assertNotIn("Listings", head)
+        self.assertIn("- **Listings:** 0", text.split(MARKER_START)[1])
+
     def test_pagination_status_matrix(self):
         import re
 
@@ -4932,6 +4951,69 @@ class InventoryOutputTests(unittest.TestCase):
         self.assertNotIn("Pagination", head)
         self.assertEqual(text.count("- **Listings:**"), 1)
         self.assertEqual(text.count("- **Pagination:**"), 1)
+
+    def test_placeholder_status_is_patched_without_pagination(self):
+        """#63: a skeleton placeholder must not survive a helper write."""
+        tmp = Path(tempfile.mkdtemp(prefix="nj-ph-status-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        path = tmp / "INVENTORY.md"
+        path.write_text(
+            "# Careers triage — Example Co\n\n"
+            "- **Slug:** example-co\n"
+            "- **Careers URL:** (fill)\n"
+            "- **Listings:** 0\n"
+            "- **Pagination:** (pending)\n"
+            "- **Status:** (pending)\n"
+        )
+        summary = {k: v for k, v in self.SUMMARY.items() if k != "pagination"}
+        summary["nListings"] = 2
+
+        upsert_inventory(path, summary)
+        text = path.read_text()
+        self.assertIn("- **Status:** complete", text)
+        self.assertNotIn("- **Status:** (pending)", text)
+        self.assertEqual(self._counts(text, ("Status",)), {"Status": 1})
+
+    def test_hand_filled_status_is_kept_without_pagination(self):
+        """A real hand-filled Status is evidence, not a placeholder."""
+        tmp = Path(tempfile.mkdtemp(prefix="nj-fill-status-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        path = tmp / "INVENTORY.md"
+        path.write_text(
+            "# Careers triage — Example Co\n\n"
+            "- **Slug:** example-co\n"
+            "- **Careers URL:** (fill)\n"
+            "- **Listings:** 1\n"
+            "- **Pagination:** (pending)\n"
+            "- **Status:** captured (manual card extract)\n"
+        )
+        summary = {k: v for k, v in self.SUMMARY.items() if k != "pagination"}
+        summary["nListings"] = 1
+
+        upsert_inventory(path, summary)
+        text = path.read_text()
+        self.assertIn("- **Status:** captured (manual card extract)", text)
+        self.assertEqual(self._counts(text, ("Status",)), {"Status": 1})
+
+    def test_missing_status_is_added_without_pagination(self):
+        """No placeholder to preserve: the computed Status is added."""
+        tmp = Path(tempfile.mkdtemp(prefix="nj-no-status-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        path = tmp / "INVENTORY.md"
+        path.write_text(
+            "# Careers triage — Example Co\n\n"
+            "- **Slug:** example-co\n"
+            "- **Careers URL:** (fill)\n"
+            "- **Listings:** 0\n"
+            "- **Pagination:** (pending)\n"
+        )
+        summary = {k: v for k, v in self.SUMMARY.items() if k != "pagination"}
+        summary["nListings"] = 2
+
+        upsert_inventory(path, summary)
+        text = path.read_text()
+        self.assertIn("- **Status:** complete", text)
+        self.assertEqual(self._counts(text, ("Status",)), {"Status": 1})
 
     def test_unknown_departments_say_so(self):
         self.assertEqual(

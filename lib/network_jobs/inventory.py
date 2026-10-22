@@ -10,8 +10,11 @@ from typing import Any
 MARKER_START = "<!-- nj-summary:start -->"
 MARKER_END = "<!-- nj-summary:end -->"
 
-# Header fields the helpers own. They must agree with index/*.json, so they
-# are patched by code rather than left to the model (see #33).
+# Header fields the helpers own. render_summary_block is the canonical home for
+# the ones it emits (SUMMARY_BLOCK_FIELDS); the header keeps `Careers URL` and
+# `Status`. `Status` is patched from index/*.json when the summary has
+# pagination data or when the header still holds a placeholder (`(pending)`,
+# empty); a hand-filled value is preserved (see #63).
 HEADER_FIELDS = ("Listings", "Careers URL", "Pagination", "Status")
 # Of those, render_summary_block can also emit. The summary block is their
 # canonical home when it renders them, so the header must not repeat them and
@@ -166,6 +169,33 @@ def _rendered_field_labels(block: str) -> list[str]:
     return re.findall(r"^- \*\*([^*\n]+):\*\*", block, re.M)
 
 
+# Values stage-company.sh leaves for the helpers or the agent to fill. A
+# placeholder is safe to overwrite; a real hand-filled value is evidence.
+_PLACEHOLDER_HEADER_VALUES = frozenset({"", "(pending)", "(fill)"})
+
+
+def _header_region(text: str) -> str:
+    """The header block: before the summary marker or the first `## ` heading."""
+    marker = text.find(MARKER_START)
+    if marker >= 0:
+        return text[:marker]
+    match = re.search(r"\n## ", text)
+    return text[: match.start() + 1] if match else text
+
+
+def _header_field_value(text: str, label: str) -> str | None:
+    """The current header value of `label`, or None when the line is absent."""
+    match = re.search(
+        rf"^- \*\*{re.escape(label)}:\*\*([^\n]*)", _header_region(text), re.M
+    )
+    return match.group(1).strip() if match else None
+
+
+def _is_placeholder_header_value(value: str | None) -> bool:
+    """True when the header value is missing or a skeleton placeholder."""
+    return value is None or value.strip().lower() in _PLACEHOLDER_HEADER_VALUES
+
+
 def department_histogram_line(departments: dict[str, int], limit: int = 12) -> str:
     items = sorted(departments.items(), key=lambda kv: (-kv[1], kv[0]))[:limit]
     if not items:
@@ -216,10 +246,12 @@ def upsert_inventory(path: Path, summary: dict[str, Any]) -> None:
     if path.is_file():
         text = path.read_text()
         if not (isinstance(summary.get("pagination"), dict) and summary["pagination"]):
-            # No helper pagination data: keep a hand-filled Status instead of
-            # inventing `complete`. A manual card extract is `captured`, and
-            # that evidence must survive match-prefs (#63).
-            header.pop("Status", None)
+            # No helper pagination data. Preserve a hand-filled Status (a
+            # manual extract's `captured` is evidence), but never leave a
+            # skeleton placeholder behind: patch it from the listing count, so
+            # zero rows still become `blocked` (#63).
+            if not _is_placeholder_header_value(_header_field_value(text, "Status")):
+                header.pop("Status", None)
         text = patch_inventory_header(text, header)
         if MARKER_START in text and MARKER_END in text:
             text = re.sub(
