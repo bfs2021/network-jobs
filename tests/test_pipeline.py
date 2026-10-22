@@ -802,6 +802,35 @@ class ProductTitleClassificationTests(unittest.TestCase):
             out = self._category(title)
             self.assertNotEqual(out["category"], "product", title)
 
+    def test_function_word_after_product_is_not_a_product_leader(self):
+        # The leader pattern used to stop at "product" and ignore the next
+        # word, so titles that lead a different function still earned
+        # product/high (and the full +5 on a VP-Product search) (#37 review).
+        for title in ("Head of Product Design", "Director, Product Design"):
+            out = self._category(title)
+            self.assertEqual(out["category"], "design", title)
+            self.assertEqual(out["categoryConfidence"], "high", title)
+
+        out = self._category("Head of Product Security")
+        self.assertNotEqual(out["category"], "product")
+        self.assertEqual(out["category"], "it-security")
+        self.assertEqual(out["categoryConfidence"], "low")
+        self.assertTrue(out["needsLlm"])
+
+    def test_leader_with_unlisted_function_word_fails_closed(self):
+        # What may follow "product" is a whitelist (end of head or a product
+        # role noun), so a function word we have not enumerated keeps its own
+        # category via the weak map and asks for LLM follow-up instead of
+        # inheriting product's confident +5.
+        for title, category in (
+            ("Head of Product Finance", "finance"),
+            ("Head of Product Data", "data"),
+        ):
+            out = self._category(title)
+            self.assertEqual(out["category"], category, title)
+            self.assertEqual(out["categoryConfidence"], "low", title)
+            self.assertTrue(out["needsLlm"], title)
+
     def test_bare_product_word_is_not_a_category_signal(self):
         # No weak product fallback remains, so a title that only mentions the
         # word cannot claim the category (and its +5) on a guess.

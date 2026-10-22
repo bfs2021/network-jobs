@@ -44,7 +44,7 @@ CATEGORY_AFFINITY: dict[str, frozenset[str]] = {
 TITLE_CATEGORY_PATTERNS: list[tuple[str, str]] = [
     (r"\b(machine learning|ml engineer|ml ops|mlops|deep learning|artificial intelligence|\bai[ -]?ml\b|llm |research scientist)\b", "ai-ml"),
     (r"\b(data scientist|data engineer|analytics engineer|bi engineer|business intelligence|data analyst|analytics)\b", "data"),
-    (r"\b(product designer|ux designer|ui designer|brand designer|graphic designer|design system|user experience|user interface)\b", "design"),
+    (r"\b(product design(?:er)?|ux designer|ui designer|brand designer|graphic designer|design system|user experience|user interface)\b", "design"),
     (r"\b(product manager|\bpm\b|group pm|staff pm|principal pm|product lead|product owner|technical product manager|\btpm\b|program manager)\b", "product"),
     (r"\b(account executive|\bae\b|\bsdr\b|\bbdr\b|sales engineer|solutions engineer|business development|account director|sales manager)\b", "sales"),
     (r"\b(product marketing|demand gen|growth marketing|content marketer|communications|copywriter|\bpmm\b|\bpr\b)\b", "marketing"),
@@ -81,9 +81,24 @@ PRODUCT_ROLE_RE = re.compile(
     r"|\bchief product officer\b",
     re.I,
 )
+# What may follow "product" when a leader owns the function: either nothing
+# ("Head of Product", "VP, Product", "Director, Product") or a noun that still
+# names the product function itself ("Director of Product Management",
+# "VP, Product Strategy"). Any other word after "product" names a different
+# function that already owns a category — "Head of Product Design" (design),
+# "Head of Product Security" (it-security), "Head of Product Finance"
+# (finance) — so the leader pattern must not claim it. A whitelist rather
+# than a lookahead blocklist: unknown words fail closed to the weak-token /
+# department pass (which routes the function word to its own category) and
+# `needsLlm`, instead of silently earning product's +5. This is #31's bug
+# class one level deeper (#37 review).
+PRODUCT_FUNCTION_TAIL = (
+    r"(?=$|[\s,]+(?:manager|management|lead|owner|ops|operations|strategy|"
+    r"program|portfolio|planning|partnerships?)\b)"
+)
 PRODUCT_LEADER_RE = re.compile(
     r"\b(head|director|vp|vice president|svp|evp|avp|chief|gm|general manager)"
-    r"\b(?:\s+of)?[\s,]+product\b",
+    r"\b(?:\s+of)?[\s,]+product\b" + PRODUCT_FUNCTION_TAIL,
     re.I,
 )
 # Level-only titles ("Manager", "Senior Director", "VP") carry no domain, so a
@@ -101,7 +116,7 @@ BARE_LEADER_RE = re.compile(
     r"interim|acting)\s*$",
     re.I,
 )
-PRODUCT_QUALIFIER_RE = re.compile(r"^product\b", re.I)
+PRODUCT_QUALIFIER_RE = re.compile(r"^product\b" + PRODUCT_FUNCTION_TAIL, re.I)
 
 
 DEPT_CATEGORY = [
