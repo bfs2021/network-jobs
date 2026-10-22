@@ -840,6 +840,99 @@ class ClassifierLocationTests(unittest.TestCase):
         self.assertEqual(rc, 1)
 
 
+class ProductTitleClassificationTests(unittest.TestCase):
+    """#31: "product" must be the role's function, not a word in the title."""
+
+    GENUINE = [
+        "Senior Product Manager, Growth",
+        "Head of Product",
+        "Principal Product Manager",
+        "VP, Product",
+        "Director of Product Management",
+        "Group Product Manager",
+        "Manager, Product Program Management",
+    ]
+
+    def _category(self, title):
+        from network_jobs.classify import classify_job
+
+        return classify_job({"title": title, "location": "Remote"})
+
+    def test_sourcing_and_incident_response_are_not_product(self):
+        for title in (
+            "New Product Introduction (NPI) Sourcing Manager, Data Center Power & Cooling",
+            "Incident Response Manager - Product & Engineering",
+        ):
+            out = self._category(title)
+            self.assertNotEqual(out["category"], "product", title)
+            self.assertIn(out["category"], ("operations", "other"), title)
+            self.assertEqual(out["categoryConfidence"], "low", title)
+            self.assertTrue(out["needsLlm"], title)
+
+    def test_genuine_product_titles_stay_high_confidence(self):
+        for title in self.GENUINE:
+            out = self._category(title)
+            self.assertEqual(out["category"], "product", title)
+            self.assertEqual(out["categoryConfidence"], "high", title)
+
+    def test_product_in_trailing_qualifier_does_not_match(self):
+        for title in (
+            "Facilities Manager - Product",
+            "Facilities Manager \u2014 Product",
+            "Facilities Manager | Product",
+            "Warehouse Manager, Product",
+        ):
+            out = self._category(title)
+            self.assertNotEqual(out["category"], "product", title)
+
+    def test_function_word_after_product_is_not_a_product_leader(self):
+        # The leader pattern used to stop at "product" and ignore the next
+        # word, so titles that lead a different function still earned
+        # product/high (and the full +5 on a VP-Product search) (#37 review).
+        for title in ("Head of Product Design", "Director, Product Design"):
+            out = self._category(title)
+            self.assertEqual(out["category"], "design", title)
+            self.assertEqual(out["categoryConfidence"], "high", title)
+
+        out = self._category("Head of Product Security")
+        self.assertNotEqual(out["category"], "product")
+        self.assertEqual(out["category"], "it-security")
+        self.assertEqual(out["categoryConfidence"], "low")
+        self.assertTrue(out["needsLlm"])
+
+    def test_leader_with_unlisted_function_word_fails_closed(self):
+        # What may follow "product" is a whitelist (end of head or a product
+        # role noun), so a function word we have not enumerated keeps its own
+        # category via the weak map and asks for LLM follow-up instead of
+        # inheriting product's confident +5.
+        for title, category in (
+            ("Head of Product Finance", "finance"),
+            ("Head of Product Data", "data"),
+        ):
+            out = self._category(title)
+            self.assertEqual(out["category"], category, title)
+            self.assertEqual(out["categoryConfidence"], "low", title)
+            self.assertTrue(out["needsLlm"], title)
+
+    def test_bare_product_word_is_not_a_category_signal(self):
+        # No weak product fallback remains, so a title that only mentions the
+        # word cannot claim the category (and its +5) on a guess.
+        out = self._category("Product Wizard")
+        self.assertEqual(out["category"], "other")
+        self.assertEqual(out["categoryConfidence"], "low")
+        self.assertTrue(out["needsLlm"])
+
+    def test_other_weak_tokens_remain_low_confidence(self):
+        # The remaining bare-token fallbacks still emit low confidence, so
+        # score_job reports category-unconfirmed instead of a silent bonus.
+        from network_jobs.prefs import score_job
+
+        out = score_job({"title": "Data Wizard", "company": "Acme",
+                         "location": "Remote"}, {"categories": ["product"]})
+        self.assertIn("category-unconfirmed", out["matchReasons"])
+        self.assertNotIn("category-affinity", out["matchReasons"])
+
+
 class CrawlAndIntroTests(unittest.TestCase):
     def test_intro_role_filters(self):
         from network_jobs.intros import filter_jobs
