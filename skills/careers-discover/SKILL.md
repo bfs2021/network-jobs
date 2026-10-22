@@ -228,6 +228,37 @@ try WebFetch/curl
 
 Never start with agent-browser for a simple static page. Never keep retrying browser against a hard auth wall.
 
+## Browser version floor
+
+`agent-browser` is optional but load-bearing for JS-heavy boards, and a stale
+build fails in ways that look like the site's fault. Check the version against
+the floor declared in the suite's `package.json` (`agentBrowser.minVersion`):
+
+```bash
+agent-browser --version                      # e.g. "agent-browser 0.39.1"
+python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["agentBrowser"]["minVersion"])' "$SUITE/package.json"
+```
+
+If the installed version is **below** the floor:
+
+1. Say it once, plainly: `agent-browser X is below the supported floor Y — run network-jobs update`.
+2. Do **not** run `npm i -g` yourself mid-run, and do **not** retry the same failing
+   command twice. A version-floor miss is a user action, not something to work around.
+3. Fall back to the user-capture path (save the page, `paginate --input`) or stop.
+   Put the version in the fetch-log `notes` so the next run does not re-derive it.
+
+`network-jobs doctor` prints `WARN agent-browser X < Y` for this case, and
+`network-jobs update` upgrades only when below the floor — never just because a
+newer build exists.
+
+### Before declaring a command missing
+
+`agent-browser --help` groups nested subcommands under headings (`Network:`,
+`Storage:`, …) that read like top-level commands. `har` is `agent-browser network har start`,
+not `agent-browser har`. A first `Unknown command: X` means "try `<group> X`",
+not "this build lacks the feature" — check `agent-browser <group> --help` before
+concluding the tool is broken, and never retry the same wrong invocation.
+
 ## Helpers
 
 - [`helpers/stage-company.sh`](helpers/stage-company.sh) — create triage dir skeleton

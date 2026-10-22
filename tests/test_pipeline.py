@@ -2808,5 +2808,98 @@ class FetchPackTests(unittest.TestCase):
                 server.shutdown()
 
 
+class AgentBrowserVersionFloorTests(unittest.TestCase):
+    """The browser is optional, but a *stale* browser must be visible.
+
+    A build can advertise a command in `--help` and reject it at runtime
+    (agent-browser 0.38.1 listed `har`, then returned "Unknown command: har"),
+    so a presence check is not enough — hence agentBrowser.minVersion in
+    package.json and the shared helpers in lib/browser.sh.
+    """
+
+    def _shim(self, version: str) -> tuple[Path, Path]:
+        tmp = Path(tempfile.mkdtemp(prefix="nj-ab-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        exe = bin_dir / "agent-browser"
+        exe.write_text(f'#!/usr/bin/env bash\necho "agent-browser {version}"\n')
+        exe.chmod(0o755)
+        return tmp, bin_dir
+
+    def _bash(self, script: str, env: dict | None = None):
+        import subprocess
+
+        e = dict(os.environ)
+        if env:
+            e.update(env)
+        return subprocess.run(["bash", "-c", script], capture_output=True,
+                              text=True, env=e, timeout=120)
+
+    def test_version_ge_semantics(self):
+        cases = [
+            ("0.39.1", "0.39.1", 0),
+            ("0.40.0", "0.39.1", 0),
+            ("0.39.10", "0.39.9", 0),
+            ("1.0.0", "0.99.0", 0),
+            ("0.38.1", "0.39.1", 1),
+            ("0.39.0", "0.39.1", 1),
+        ]
+        for have, want, expected in cases:
+            proc = self._bash(
+                f'source "{ROOT}/lib/browser.sh"; ab_version_ge {have} {want}')
+            self.assertEqual(proc.returncode, expected,
+                             f"{have} >= {want} (stderr={proc.stderr})")
+
+    def test_min_version_read_from_package_json(self):
+        proc = self._bash(
+            f'source "{ROOT}/lib/browser.sh"; ab_min_version "{ROOT}/package.json"')
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "0.39.1")
+
+    def test_installed_version_parsed_from_output(self):
+        _tmp, bin_dir = self._shim("0.38.1")
+        proc = self._bash(
+            f'source "{ROOT}/lib/browser.sh"; ab_installed_version',
+            env={"PATH": f"{bin_dir}:{os.environ['PATH']}"})
+        self.assertEqual(proc.stdout.strip(), "0.38.1")
+
+    @unittest.skipUnless(
+        all(shutil.which(t) for t in ("jq", "curl", "unzip")),
+        "doctor requires jq/curl/unzip")
+    def test_doctor_warns_when_below_floor(self):
+        tmp, bin_dir = self._shim("0.38.1")
+        proc = self._bash(
+            f'"{ROOT}/bin/network-jobs" doctor',
+            env={"PATH": f"{bin_dir}:{os.environ['PATH']}",
+                 "NETWORK_JOBS_HOME": str(tmp / "data")})
+        self.assertIn("WARN agent-browser 0.38.1 < 0.39.1", proc.stdout)
+        self.assertIn("network-jobs update", proc.stdout)
+
+    @unittest.skipUnless(
+        all(shutil.which(t) for t in ("jq", "curl", "unzip")),
+        "doctor requires jq/curl/unzip")
+    def test_doctor_ok_at_floor(self):
+        tmp, bin_dir = self._shim("0.39.1")
+        proc = self._bash(
+            f'"{ROOT}/bin/network-jobs" doctor',
+            env={"PATH": f"{bin_dir}:{os.environ['PATH']}",
+                 "NETWORK_JOBS_HOME": str(tmp / "data")})
+        self.assertIn("OK  agent-browser 0.39.1", proc.stdout)
+        self.assertNotIn("WARN agent-browser", proc.stdout)
+
+    def test_setup_reports_floor_without_installing(self):
+        # --no-browser + --no-launcher keeps this offline; setup must still
+        # surface the version gap rather than saying "ready".
+        tmp, bin_dir = self._shim("0.38.1")
+        proc = self._bash(
+            f'HOME="{tmp / "home"}" bash "{ROOT}/setup" --no-browser --no-launcher --agent auto',
+            env={"PATH": f"{bin_dir}:{os.environ['PATH']}",
+                 "NETWORK_JOBS_HOME": str(tmp / "data")})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("agent-browser 0.38.1 < 0.39.1", proc.stdout)
+        self.assertIn("network-jobs update", proc.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -29,6 +29,9 @@
   "engines": {
     "node": ">=18"
   },
+  "agentBrowser": {
+    "minVersion": "0.39.1"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/hirefrank/network-jobs.git"

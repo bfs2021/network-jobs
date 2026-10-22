@@ -6,6 +6,8 @@ set -euo pipefail
 SUITE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/agents.sh
 source "$SUITE_ROOT/lib/agents.sh"
+# shellcheck source=lib/browser.sh
+source "$SUITE_ROOT/lib/browser.sh"
 
 DATA_HOME="${NETWORK_JOBS_HOME:-$HOME/.network-jobs}"
 SKILLS_SRC="$SUITE_ROOT/skills"
@@ -116,9 +118,33 @@ refresh_tool_path() {
 }
 
 # --- browser automation (default on; needed for JS-heavy career pages) ---
+# Presence is not enough: a stale build can advertise a command in `--version`
+# help text and reject it at runtime, so compare against agentBrowser.minVersion
+# and upgrade only when below the floor (never just because a newer build exists).
 browser_note=""
 if command -v agent-browser >/dev/null 2>&1; then
-  browser_note="agent-browser ready"
+  ab_have="$(ab_installed_version || true)"
+  ab_min="$(ab_min_version "$SUITE_ROOT/package.json" || true)"
+  if [[ -n "$ab_have" && -n "$ab_min" ]] && ! ab_version_ge "$ab_have" "$ab_min"; then
+    if [[ "$WITH_BROWSER" -eq 1 ]] && NPM_BIN="$(resolve_npm)"; then
+      echo "Upgrading agent-browser $ab_have → $ab_min (below the supported floor)…"
+      if "$NPM_BIN" install -g agent-browser@latest >/dev/null 2>&1; then
+        refresh_tool_path "$NPM_BIN"
+        ab_new="$(ab_installed_version || true)"
+        if [[ -n "$ab_new" ]] && ab_version_ge "$ab_new" "$ab_min"; then
+          browser_note="agent-browser $ab_new (upgraded from $ab_have)"
+        else
+          browser_note="agent-browser ${ab_new:-$ab_have} < $ab_min — upgrade did not take effect (run: $NPM_BIN i -g agent-browser@latest)"
+        fi
+      else
+        browser_note="agent-browser $ab_have < $ab_min — upgrade failed (run: $NPM_BIN i -g agent-browser@latest)"
+      fi
+    else
+      browser_note="agent-browser $ab_have < $ab_min — run: network-jobs update"
+    fi
+  else
+    browser_note="agent-browser ${ab_have:-ready}"
+  fi
 elif [[ "$WITH_BROWSER" -eq 1 ]]; then
   if NPM_BIN="$(resolve_npm)"; then
     echo "Installing agent-browser…"
