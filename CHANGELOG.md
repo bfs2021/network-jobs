@@ -35,22 +35,23 @@
   resets (including the same causes when `urlopen` wraps them in `URLError`) —
   get up to two retries, while DNS/TLS failures, other 4xx, non-http URLs and
   oversized bodies get exactly one request. A 429/503 is obeyed per its
-  `Retry-After` header (seconds or HTTP-date, capped at 30s) instead of the
-  exponential guess, and a host that answered 429 gets a 1s pause before the
-  next job on it. A 403 that carries a CDN bot-wall signature (`Server:
-  CloudFront` and/or `x-sigsci-request-id`) is the one 4xx that is retried
-  (#67): the wall clears in about a minute, so it waits 30s and then 60s (or
-  its own capped `Retry-After`), a bare 403 still gets exactly one request,
-  and a host whose wall survives both cooldowns is blocked for the rest of the
-  run — one attempt per later job instead of 39 x 90s — with `botWalled: true`
-  in the summary. A run-level budget (50 retries, or 5 consecutive retryable
-  failures) stops retrying for the rest of the run and adds
-  `retriesDisabled: true` to the summary, so a board that is down cannot turn
-  222 rows into 666 requests and ~11 minutes of sleep. On the live Anthropic
-  board the first pass fetched 185 of 222 bodies and the immediate rerun
-  fetched the missing 37/37; once `http-403` was surfaced, a later pass showed
-  183/222 with all 39 failures from CloudFront and every one of those URLs
-  answering 200 about 45s later while `boards-api.greenhouse.io` stayed up.
+  `Retry-After` header (seconds or HTTP-date) instead of the exponential guess;
+  a request longer than 30s is not retried at all rather than retried early.
+  A host that answered 429 gets a 1s pause before the next job on it. The
+  run-level budget only charges retries that failed, so a board whose retry
+  recovers every row still fetches the whole board; 5 consecutive failing jobs
+  trip a soft stop that the next success clears, and 50 failed retries is a
+  hard stop. `retriesDisabled: true` appears only when retries are still off
+  at the end. On the live Anthropic board the first pass fetched 185 of 222
+  bodies and the immediate rerun fetched the missing 37/37.
+- A CloudFront/SigSci bot-wall 403 is the one 4xx that is retried (#67): the
+  wall clears in about a minute, so it waits 30s and then 60s (or its own
+  capped `Retry-After`), while a bare 403 still gets exactly one request. After
+  a recovered wall, a second wall on that host is treated as blocked instead of
+  paying the cooldowns again; blocked hosts get one attempt per later job and
+  the summary carries `botWalled: true`. On the live board a later pass showed
+  183/222 with all 39 failures from CloudFront, and every one of those URLs
+  answered 200 about 45s later while `boards-api.greenhouse.io` stayed up.
 
 ### Fixed
 - Staging silently dropped distinct postings whose board reuses one

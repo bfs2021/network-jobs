@@ -2271,21 +2271,35 @@ class FetchDescriptionsTests(unittest.TestCase):
         self.assertEqual(sleeps, [4.0])
 
     def test_retry_after_http_date_is_used(self):
-        # The header's other legal form: an absolute HTTP-date.
+        # The header's other legal form: an absolute HTTP-date. Parse it
+        # directly (no float() shortcut) and then end-to-end.
         import email.utils
-        import time as _time
-        from network_jobs.descriptions import fetch_descriptions
+        from datetime import datetime, timedelta, timezone
+        from network_jobs.descriptions import (
+            _retry_after_seconds, fetch_descriptions)
+
+        when = email.utils.format_datetime(
+            datetime.now(timezone.utc) + timedelta(seconds=7), usegmt=True)
+        self.assertTrue(when.endswith("GMT"))
+        self.assertFalse(when.replace(".", "", 1).isdigit(), when)
+        parsed = _retry_after_seconds(self._retry_after_headers(when))
+        self.assertIsNotNone(parsed)
+        self.assertGreater(parsed, 4)
+        self.assertLessEqual(parsed, 8)
 
         triage = self._retry_triage()
         calls = []
         sleeps = []
-        when = email.utils.formatdate(_time.time() + 2, usegmt=True)
+        # Snapshot the clock the same way the parser does: a date 2s ahead
+        # must produce a positive wait well under the cap.
+        soon = email.utils.formatdate(__import__("time").time() + 2,
+                                       usegmt=True)
 
         def fetch(url):
             calls.append(url)
             if len(calls) == 1:
                 raise self._http_error(
-                    url, 429, "slow down", self._retry_after_headers(when))
+                    url, 429, "slow down", self._retry_after_headers(soon))
             return 200, "text/html", self.HTML.encode()
 
         result = fetch_descriptions(
@@ -2295,35 +2309,37 @@ class FetchDescriptionsTests(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         self.assertEqual(len(sleeps), 1)
         self.assertGreater(sleeps[0], 0)
-        self.assertLessEqual(sleeps[0], 30)
+        self.assertLessEqual(sleeps[0], 3)
 
-    def test_retry_after_is_capped(self):
-        # A server asking for 16 minutes must not stall the run for 16 minutes.
+    def test_retry_after_over_cap_skips_the_retry(self):
+        # A server asking for 16 minutes is not asking us to come back in 30s:
+        # respect it by not retrying at all (`Retry-After: 120` likewise).
         from network_jobs.descriptions import (
             fetch_descriptions, fetch_job_description)
 
-        triage = self._retry_triage()
-        sleeps = []
-        calls = []
+        for value in ("120", "999"):
+            triage = self._retry_triage()
+            sleeps = []
+            calls = []
 
-        def fetch(url):
-            calls.append(url)
-            if len(calls) == 1:
+            def fetch(url, value=value):
+                calls.append(url)
                 raise self._http_error(
-                    url, 429, "slow down", self._retry_after_headers("999"))
-            return 200, "text/html", self.HTML.encode()
+                    url, 429, "slow down",
+                    self._retry_after_headers(value))
 
-        def failing(url):
-            raise self._http_error(
-                url, 429, "slow down", self._retry_after_headers("999"))
+            direct = fetch_job_description("https://x/jobs/1", fetch=fetch)
+            self.assertEqual(direct, {
+                "error": "http-429", "retryAfter": 30.0,
+                "retryAfterTooLong": True}, value)
 
-        direct = fetch_job_description("https://x/jobs/1", fetch=failing)
-        self.assertEqual(direct, {"error": "http-429", "retryAfter": 30.0})
-
-        result = fetch_descriptions(
-            triage, fetch=fetch, sleep=lambda s: sleeps.append(s))
-        self.assertEqual(result["fetched"], 1)
-        self.assertEqual(sleeps, [30.0])
+            result = fetch_descriptions(
+                triage, fetch=fetch, sleep=lambda s: sleeps.append(s))
+            self.assertEqual(result["failed"], 1, value)
+            self.assertEqual(result["errors"],
+                             ["https://x/jobs/1: http-429"], value)
+            self.assertEqual(len(calls), 2, value)  # one direct + one run
+            self.assertEqual(sleeps, [], value)
 
     def test_host_pacing_after_429(self):
         # #64 review: after a 429, the next job on that host waits host_delay
@@ -2356,21 +2372,38 @@ class FetchDescriptionsTests(unittest.TestCase):
         self.assertEqual(sleeps, [1.0, 0.25])
 
     def test_bot_wall_signature_detection(self):
-        # #67: only the CDN-shaped 403 is a wall. A bare 403 is a dead role.
+        # #67 + re-review: only the CDN-shaped 403 is a wall. `Server:
+        # CloudFront` alone is too broad (geo-block/private object), so it
+        # needs the CloudFront error cache; SigSci's request id is enough.
         from network_jobs.descriptions import fetch_job_description
 
         sigsci = Message()
         sigsci["x-sigsci-request-id"] = "abc123"
-        cloudfront = Message()
-        cloudfront["Server"] = "cloudfront"
+        cf_error = Message()
+        cf_error["Server"] = "cloudfront"
+        cf_error["x-cache"] = "Error from cloudfront"
 
-        for headers in (sigsci, cloudfront, self._bot_wall_headers()):
+        for headers in (sigsci, cf_error, self._bot_wall_headers()):
             def fetch(url, headers=headers):
                 raise self._http_error(url, 403, "blocked", headers)
 
             self.assertEqual(
                 fetch_job_description("https://x/jobs/1", fetch=fetch),
                 {"error": "http-403", "botWall": True})
+
+        cf_only = Message()
+        cf_only["Server"] = "CloudFront"
+        cf_ok_cache = Message()
+        cf_ok_cache["Server"] = "CloudFront"
+        cf_ok_cache["x-cache"] = "Hit from cloudfront"
+
+        for headers in (cf_only, cf_ok_cache):
+            def fetch(url, headers=headers):
+                raise self._http_error(url, 403, "forbidden", headers)
+
+            self.assertEqual(
+                fetch_job_description("https://x/jobs/1", fetch=fetch),
+                {"error": "http-403"}, headers.items())
 
         def bare(url):
             raise self._http_error(url, 403, "forbidden")
@@ -2511,8 +2544,8 @@ class FetchDescriptionsTests(unittest.TestCase):
 
     def test_all_failing_board_disables_retries(self):
         # #64 review: without a run-level budget an all-failing board makes
-        # 3x the requests and sleeps per retry. The breaker trips and the run
-        # finishes with the pre-retry request count instead.
+        # 3x the requests and sleeps per retry. The soft trip fires after
+        # max_consecutive_failures jobs and the rest are single-shot.
         from network_jobs.descriptions import fetch_descriptions
 
         triage = self._retry_triage(10)
@@ -2531,11 +2564,151 @@ class FetchDescriptionsTests(unittest.TestCase):
         self.assertTrue(result["retriesDisabled"])
         self.assertEqual(set(result), {"fetched", "skipped", "failed",
                                        "errors", "out", "retriesDisabled"})
-        self.assertLess(len(calls), 20)  # 13 with the default budget
-        self.assertGreater(len(calls), 10)  # but it did retry first
-        self.assertLessEqual(sum(sleeps), 5)
+        # Five failing jobs pay the full 3 attempts, the last five get one.
+        self.assertEqual(len(calls), 20)
+        self.assertEqual(sum(sleeps), 15.0)
         written = json.loads((triage / "index" / "matches.json").read_text())
         self.assertNotIn("description", written["jobs"][0])
+
+    def test_all_failing_board_stays_bounded_at_scale(self):
+        # The down-board guarantee at the size that started this: 222 rows
+        # must not become 666 requests and ~11 minutes of sleep.
+        from network_jobs.descriptions import fetch_descriptions
+
+        triage = self._retry_triage(222)
+        calls = []
+        sleeps = []
+
+        def fetch(url):
+            calls.append(url)
+            return 503, "text/html", b"unavailable"
+
+        result = fetch_descriptions(
+            triage, fetch=fetch, sleep=lambda s: sleeps.append(s))
+
+        self.assertEqual(result["failed"], 222)
+        self.assertTrue(result["retriesDisabled"])
+        self.assertEqual(len(calls), 5 * 3 + (222 - 5))  # 232, not 666
+        self.assertEqual(sum(sleeps), 15.0)  # not ~666s
+
+    def test_recovered_retries_do_not_consume_the_budget(self):
+        # #64 re-review: a first-request 429 whose retry succeeds must not
+        # starve later jobs. 222 rows, one successful retry each.
+        from network_jobs.descriptions import fetch_descriptions
+
+        triage = self._retry_triage(222)
+        attempts = {}
+        calls = []
+
+        def fetch(url):
+            calls.append(url)
+            attempts[url] = attempts.get(url, 0) + 1
+            if attempts[url] == 1:
+                raise self._http_error(url, 429, "slow down")
+            return 200, "text/html", self.HTML.encode()
+
+        result = fetch_descriptions(
+            triage, fetch=fetch, sleep=lambda s: None)
+
+        self.assertEqual(result["fetched"], 222)
+        self.assertEqual(result["failed"], 0)
+        self.assertNotIn("retriesDisabled", result)
+        self.assertEqual(len(calls), 444)
+        rows = json.loads((triage / "index" / "matches.json").read_text())
+        self.assertTrue(all("description" in row for row in rows["jobs"]))
+
+    def test_failing_jobs_do_not_disarm_other_hosts(self):
+        # #64 re-review: two jobs that exhaust their retries are two failing
+        # jobs, not five failing attempts. Twenty later jobs that each need
+        # one successful retry must still fetch (was 0/20).
+        from network_jobs.descriptions import fetch_descriptions
+
+        triage = self._retry_triage(22)
+        attempts = {}
+        calls = []
+        sleeps = []
+
+        def fetch(url):
+            calls.append(url)
+            attempts[url] = attempts.get(url, 0) + 1
+            if url.endswith(("/jobs/1", "/jobs/2")):
+                return 503, "text/html", b"unavailable"
+            if attempts[url] == 1:
+                raise self._http_error(url, 429, "slow down")
+            return 200, "text/html", self.HTML.encode()
+
+        result = fetch_descriptions(
+            triage, fetch=fetch, sleep=lambda s: sleeps.append(s))
+
+        self.assertEqual(result["fetched"], 20)
+        self.assertEqual(result["failed"], 2)
+        self.assertNotIn("retriesDisabled", result)
+        self.assertEqual(len(calls), 2 * 3 + 20 * 2)
+
+    def test_soft_trip_reenables_after_a_success(self):
+        # The consecutive trip is soft: a job that succeeds on its first
+        # attempt clears it, so a host that recovers gets retries again.
+        from network_jobs.descriptions import fetch_descriptions
+
+        triage = self._retry_triage(4)
+        attempts = {}
+        calls = []
+        sleeps = []
+
+        def fetch(url):
+            calls.append(url)
+            attempts[url] = attempts.get(url, 0) + 1
+            if url.endswith(("/jobs/1", "/jobs/2")):
+                return 503, "text/html", b"unavailable"
+            if url.endswith("/jobs/3"):
+                return 200, "text/html", self.HTML.encode()
+            if attempts[url] == 1:
+                raise self._http_error(url, 429, "slow down")
+            return 200, "text/html", self.HTML.encode()
+
+        result = fetch_descriptions(
+            triage, fetch=fetch, max_consecutive_failures=2,
+            sleep=lambda s: sleeps.append(s))
+
+        self.assertEqual(result["fetched"], 2)
+        self.assertEqual(result["failed"], 2)
+        self.assertNotIn("retriesDisabled", result)  # cleared at the end
+        # jobs 1-2: 3 attempts each; job 3: one; job 4: retry is back on.
+        self.assertEqual(len(calls), 3 + 3 + 1 + 2)
+
+    def test_recurring_bot_wall_blocks_after_one_recovery(self):
+        # #64 re-review: a wall that clears on the 30s retry and returns on
+        # the next job must not cost 30s per job until the budget runs out.
+        from network_jobs.descriptions import fetch_descriptions
+
+        triage = self._retry_triage(3)
+        attempts = {}
+        calls = []
+        sleeps = []
+
+        def fetch(url):
+            calls.append(url)
+            attempts[url] = attempts.get(url, 0) + 1
+            if url.endswith("/jobs/1") and attempts[url] == 1:
+                raise self._http_error(
+                    url, 403, "blocked", self._bot_wall_headers())
+            if url.endswith("/jobs/2"):
+                raise self._http_error(
+                    url, 403, "blocked", self._bot_wall_headers())
+            return 200, "text/html", self.HTML.encode()
+
+        result = fetch_descriptions(
+            triage, fetch=fetch, host_delay=0.25,
+            sleep=lambda s: sleeps.append(s))
+
+        self.assertEqual(result["fetched"], 2)
+        self.assertEqual(result["failed"], 1)
+        self.assertTrue(result["botWalled"])
+        # job 1: wall + one 30s cooldown; job 2: single attempt, no
+        # cooldown; job 3: single attempt, success.
+        self.assertEqual(len(calls), 2 + 1 + 1)
+        self.assertEqual(sleeps, [30.0, 0.25, 0.25])
+        self.assertNotIn("retriesDisabled", result)
 
     def test_url_errors_are_not_retried(self):
         # #64 review: DNS/TLS failures do not clear by retrying. urlopen wraps
