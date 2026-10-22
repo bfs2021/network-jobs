@@ -141,7 +141,9 @@ python3 "$SUITE/skills/careers-discover/helpers/fetch-descriptions.py" \
 Fills `description` (truncated plain text) plus `descriptionFetchedAt` /
 `descriptionSource`, and fills `department` from the ATS payload when the
 row lacks one. Fetch failures never fail the run — undescribed rows score
-exactly as before. Bodies ride through ingest automatically.
+exactly as before. Bodies ride through ingest automatically. `matches.json`
+keeps its object shape (`jobs[]` + summary keys); a re-run of `match-prefs`
+restores these bodies (`restoredDescriptions`).
 
 7b. **Fetch descriptions for matches (required helper)**
 
@@ -157,7 +159,9 @@ This fills `description` (truncated plain text, ~10k chars) plus
 `descriptionFetchedAt`/`descriptionSource` on matches.json rows, and fills
 `department` from the ATS payload when the row lacks one. Fetch failures
 never fail the run — undescribed rows score exactly as before. Bodies flow
-through ingest automatically (`dict` copies end to end).
+through ingest automatically (`dict` copies end to end). The file stays the
+documented object (`jobs[]` + summary), and re-running `match-prefs`
+restores the bodies instead of clobbering them.
 
 To review the shortlist as job families instead of a flat list (so deal-breakers
 are set against observed counts), run:

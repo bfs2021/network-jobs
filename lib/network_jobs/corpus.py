@@ -11,6 +11,7 @@ from typing import Any
 from .embeddings import maybe_update_embeddings
 from .fingerprint import fingerprint
 from .locations import location_buckets_for, primary_location_bucket
+from .matches import MatchesFormatError, normalize_matches
 from .text import normalize_company, slugify
 
 SHARD_SKIP = {"manifest.json", "jobs-all.json"}
@@ -28,9 +29,10 @@ def load_jobs(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
     data = json.loads(path.read_text())
-    if not isinstance(data, list):
-        raise SystemExit(f"{path} must be a JSON array")
-    return data
+    try:
+        return list(normalize_matches(data, origin=str(path))["jobs"])
+    except MatchesFormatError as exc:
+        raise SystemExit(str(exc)) from exc
 
 
 def job_fingerprint(job: dict[str, Any]) -> str:

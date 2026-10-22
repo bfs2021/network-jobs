@@ -14,6 +14,7 @@ from .classify import classify_listings
 from .fingerprint import fingerprint
 from .corpus import rebuild
 from .inventory import upsert_inventory, write_summary_json
+from .matches import MatchesFormatError, load_matches, normalize_matches, write_matches
 from .pagination import DEFAULT_MAX_LISTINGS, DEFAULT_MAX_PAGES, paginate, write_pagination
 from .paths import data_home
 from .prefs import load_resume_keywords, match_listings, name_tokens
@@ -91,7 +92,7 @@ def _do_match_prefs(
         "ingestDefault": "matches",
         "jobs": result["jobs"],
     }
-    matches_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
+    write_matches(matches_path, payload)
     summary = {
         "company": company,
         "nListings": result["nListings"],
@@ -116,17 +117,25 @@ def _row_keys(job: dict[str, Any], company: str) -> list[str]:
     `fingerprint()` short-circuits on an existing `fingerprint` field.
     Since #25, fingerprint no longer includes the company segment — it is
     `id:{atsId}` or `fp:{hash(company+title+location)}` from job data.
-    The join tries: stored fingerprint, computed fingerprint (ignores CLI
-    company), then raw ATS id. This handles both old and new fingerprint
-    spellings.
+    The join tries: stored fingerprint, computed fingerprint (from the row's
+    own company, or the CLI company when the row has none yet), then raw ATS
+    id. This handles both old and new fingerprint spellings.
     """
     keys: list[str] = []
     stored = job.get("fingerprint")
     if isinstance(stored, str) and stored:
         keys.append(stored)
-    for name in (company, ""):
+    # `fingerprint()` keys on the job's own company field (the CLI flag is
+    # ignored since #25). A listings row often has no company yet while the
+    # scored row it must join against does, so try both spellings.
+    sources = [job]
+    if company and not job.get("company"):
+        sources.append({**job, "company": company})
+    for source in sources:
         try:
-            computed = fingerprint({k: v for k, v in job.items() if k != "fingerprint"}, company=name)
+            computed = fingerprint(
+                {k: v for k, v in source.items() if k != "fingerprint"}
+            )
         except Exception:
             continue
         if computed and computed not in keys:
@@ -157,10 +166,11 @@ def _rehydrate_descriptions(
     then raw ATS id. This handles both old (pre-#25) and new fingerprint
     spellings. Rows that genuinely have no prior body are left undescribed.
     """
-    prior = _load_json(matches_path, None)
-    rows = prior.get("jobs") if isinstance(prior, dict) else prior
-    if not isinstance(rows, list):
+    try:
+        prior = load_matches(matches_path)
+    except MatchesFormatError:
         return 0
+    rows = prior["jobs"]
 
     by_key: dict[str, dict[str, Any]] = {}
     by_ext: dict[str, list[dict[str, Any]]] = {}
@@ -249,6 +259,10 @@ def cmd_review_matches(args: argparse.Namespace) -> int:
     Read-only by default: prints families + leak report. With --veto,
     appends phrases to preferences.json dealBreakers (marks confirmed),
     rewrites matches.json, and prints before/after counts.
+
+    Prior JD bodies are carried from `matches.json` onto `listings.json`
+    before any re-score (same join as `match-prefs`), so `--veto` cannot
+    clobber descriptions (#24, #32).
     """
     triage = Path(args.triage_dir).expanduser().resolve()
     listings_path = Path(args.listings) if args.listings else triage / "index" / "listings.json"
@@ -268,6 +282,9 @@ def cmd_review_matches(args: argparse.Namespace) -> int:
     profile = _load_json(data / "profile.json", {})
     exclude = name_tokens(profile) if isinstance(profile, dict) else set()
     company = args.company or ""
+    restored_descriptions = _rehydrate_descriptions(
+        listings, triage / "index" / "matches.json", company
+    )
 
     def run(current_prefs: dict[str, Any]) -> dict[str, Any]:
         resume_vector, job_vectors = _match_semantic(data, resume_text)
@@ -307,6 +324,7 @@ def cmd_review_matches(args: argparse.Namespace) -> int:
             "after": ({"matches": after["nMatches"], "listings": after["nListings"]}
                       if after else None),
             "vetoesAdded": added,
+            "restoredDescriptions": restored_descriptions,
             "families": families,
             "leaks": leaks,
             "warnings": shown["warnings"],
@@ -829,32 +847,32 @@ def cmd_rebuild(args: argparse.Namespace) -> int:
     return 0
 
 
-def _coerce_job_list(payload: Any) -> list[Any] | None:
-    """Return the job list from either supported on-disk shape, else None.
-
-    `match-prefs` writes a `{"jobs": [...]}` envelope; `fetch-descriptions`
-    writes a bare array. Both appear in the documented classify path, so
-    accept either rather than making every caller hand-extract with jq.
-    """
-    if isinstance(payload, list):
-        return payload
-    if isinstance(payload, dict):
-        jobs = payload.get("jobs")
-        if isinstance(jobs, list):
-            return jobs
-    return None
-
-
 def cmd_classify(args: argparse.Namespace) -> int:
-    listings = _coerce_job_list(_load_json(Path(args.input), []))
-    if listings is None:
+    # Ingest reads matches.json by default, so accept the documented object
+    # and legacy bare arrays through the same normalizer every other reader
+    # uses (#32). `--out` stays a bare array: rebuild-corpus consumes a job
+    # list, not a matches envelope. Writing back over the input, though, goes
+    # through `write_matches` with the envelope's summary keys intact, because
+    # a bare array there is the #32 shape flip again.
+    try:
+        envelope = normalize_matches(
+            _load_json(Path(args.input), []), origin=args.input
+        )
+    except MatchesFormatError:
         print('input must be a JSON array of jobs, or an object with a "jobs" array',
               file=sys.stderr)
         return 1
+    listings = envelope["jobs"]
     result = classify_listings(listings, company=args.company or None)
     dest = Path(args.out) if args.out else Path(args.input)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(json.dumps(result["jobs"], indent=2, ensure_ascii=False) + "\n")
+    if dest.resolve() == Path(args.input).resolve():
+        # In place: keep the documented object shape. Summary keys (`showing`,
+        # `ingestDefault`, `departments`, `nListings`, ...) ride through; a
+        # legacy bare array input is upgraded here as every other writer does.
+        write_matches(dest, {**envelope, "jobs": result["jobs"]})
+    else:
+        dest.write_text(json.dumps(result["jobs"], indent=2, ensure_ascii=False) + "\n")
     quiet = {
         "n": result["n"],
         "ambiguous": result["ambiguous"],

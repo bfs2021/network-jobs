@@ -830,6 +830,86 @@ class ClassifierLocationTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(env_jobs, json.loads(dest.read_text()))
 
+    def test_classify_in_place_keeps_matches_envelope(self):
+        # No `--out` means `dest == --input`. On a matches.json object that
+        # must stay an object with its summary keys: writing `result["jobs"]`
+        # straight back would re-create the #32 bare-array flip.
+        tmp = Path(tempfile.mkdtemp(prefix="nj-clf-inplace-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        matches = tmp / "index" / "matches.json"
+        matches.parent.mkdir(parents=True)
+        envelope = {
+            "nListings": 42,
+            "nMatches": 2,
+            "showing": 2,
+            "departments": {"Product": 1, "Engineering": 1},
+            "ingestDefault": "matches",
+            "jobs": [
+                {"title": "Senior Product Manager", "location": "New York, NY"},
+                {"title": "Engineering Manager", "location": "Remote"},
+            ],
+        }
+        matches.write_text(json.dumps(envelope) + "\n")
+
+        rc = helper_main(["classify", "--input", str(matches), "--company", "Stripe"])
+        self.assertEqual(rc, 0)
+
+        written = json.loads(matches.read_text())
+        self.assertIsInstance(written, dict)
+        self.assertEqual(written["nListings"], 42)
+        self.assertEqual(written["nMatches"], 2)
+        self.assertEqual(written["showing"], 2)
+        self.assertEqual(written["departments"],
+                         {"Product": 1, "Engineering": 1})
+        self.assertEqual(written["ingestDefault"], "matches")
+        self.assertEqual([j["title"] for j in written["jobs"]],
+                         ["Senior Product Manager", "Engineering Manager"])
+        self.assertEqual(written["jobs"][0]["category"], "product")
+        self.assertEqual(written["jobs"][1]["track"], "manager")
+
+    def test_classify_in_place_upgrades_legacy_bare_array(self):
+        # A bare-array input has no summary keys to preserve, so an in-place
+        # run upgrades it to the documented object, matching `normalize_matches`.
+        tmp = Path(tempfile.mkdtemp(prefix="nj-clf-upgrade-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        matches = tmp / "index" / "matches.json"
+        matches.parent.mkdir(parents=True)
+        matches.write_text(json.dumps([
+            {"title": "Senior Product Manager", "location": "New York, NY"},
+        ]) + "\n")
+
+        rc = helper_main(["classify", "--input", str(matches), "--company", "Stripe"])
+        self.assertEqual(rc, 0)
+
+        written = json.loads(matches.read_text())
+        self.assertIsInstance(written, dict)
+        self.assertEqual(written["nMatches"], 1)
+        self.assertEqual(written["ingestDefault"], "matches")
+        self.assertEqual(written["jobs"][0]["category"], "product")
+
+    def test_classify_without_out_then_rebuild(self):
+        # classify with no --out wraps a plain job list in the matches object.
+        # rebuild-corpus used to reject that file with "must be a JSON array".
+        tmp = Path(tempfile.mkdtemp(prefix="nj-clf-rebuild-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        batch = tmp / "batch.json"
+        batch.write_text(json.dumps([
+            {"title": "Senior Product Manager", "location": "New York, NY",
+             "company": "Stripe", "url": "https://stripe.com/jobs/pm"},
+        ]) + "\n")
+
+        rc = helper_main(["classify", "--input", str(batch), "--company", "Stripe"])
+        self.assertEqual(rc, 0)
+        wrapped = json.loads(batch.read_text())
+        self.assertIsInstance(wrapped, dict)
+        self.assertIsInstance(wrapped.get("jobs"), list)
+
+        rc = helper_main(["rebuild", str(batch), "--data", str(tmp)])
+        self.assertEqual(rc, 0)
+        corpus_jobs = json.loads((tmp / "corpus" / "jobs-all.json").read_text())
+        self.assertEqual(len(corpus_jobs), 1)
+        self.assertEqual(corpus_jobs[0]["title"], "Senior Product Manager")
+
     def test_classify_rejects_unrecognised_shape(self):
         tmp = Path(tempfile.mkdtemp(prefix="nj-clf-bad-"))
         self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
@@ -1567,8 +1647,236 @@ class FetchDescriptionsTests(unittest.TestCase):
         self.assertEqual(result["fetched"], 1)
         self.assertEqual(result["failed"], 1)
         rows = json.loads((index / "matches.json").read_text())
+        self.assertIsInstance(rows, dict)
+        rows = rows["jobs"]
         self.assertIn("payments infrastructure", rows[0]["description"])
         self.assertNotIn("description", rows[1])
+
+    def test_fetch_descriptions_keeps_matches_object_shape(self):
+        # #32: match-prefs writes the SCHEMA object; fetch-descriptions must
+        # preserve the wrapper and every summary key it did not compute.
+        from network_jobs.descriptions import fetch_descriptions
+
+        tmp = Path(tempfile.mkdtemp(prefix="nj-desc-shape-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        index = tmp / "triage" / "t" / "index"
+        index.mkdir(parents=True)
+        envelope = {
+            "nListings": 40,
+            "nMatches": 2,
+            "showing": "2 of 40 match prefs",
+            "departments": {"Product": 3, "Engineering": 37},
+            "matchDepartments": {"Product": 2},
+            "ingestDefault": "matches",
+            "jobs": [
+                {"title": "Senior PM", "url": "https://x/jobs/1",
+                 "matchScore": 9},
+                {"title": "No URL Job", "matchScore": 4},
+            ],
+        }
+        (index / "matches.json").write_text(json.dumps(envelope) + "\n")
+
+        result = fetch_descriptions(
+            tmp / "triage" / "t",
+            fetch=self._fetch({"https://x/jobs/1": (200, "text/html", self.HTML)}))
+
+        self.assertEqual(result["fetched"], 1)
+        written = json.loads((index / "matches.json").read_text())
+        self.assertIsInstance(written, dict)
+        for key in ("nListings", "nMatches", "showing", "departments",
+                    "matchDepartments", "ingestDefault"):
+            self.assertEqual(written[key], envelope[key], key)
+        self.assertEqual([j["title"] for j in written["jobs"]],
+                         ["Senior PM", "No URL Job"])
+        self.assertEqual(written["jobs"][0]["matchScore"], 9)
+        self.assertIn("payments infrastructure",
+                      written["jobs"][0]["description"])
+        self.assertTrue(written["jobs"][0]["descriptionFetchedAt"])
+        self.assertEqual(written["jobs"][0]["descriptionSource"],
+                         "https://x/jobs/1")
+        self.assertNotIn("description", written["jobs"][1])
+
+    def test_fetch_descriptions_upgrades_legacy_array(self):
+        # #32: triage dirs written by the old fetch-descriptions hold a bare
+        # array. Reading one must work and writing it back must yield the
+        # documented object, with the rows untouched.
+        from network_jobs.descriptions import fetch_descriptions
+
+        tmp = Path(tempfile.mkdtemp(prefix="nj-desc-legacy-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        index = tmp / "triage" / "t" / "index"
+        index.mkdir(parents=True)
+        legacy = [
+            {"title": "Senior PM", "url": "https://x/jobs/1"},
+            {"title": "No URL Job"},
+        ]
+        (index / "matches.json").write_text(json.dumps(legacy) + "\n")
+
+        result = fetch_descriptions(
+            tmp / "triage" / "t",
+            fetch=self._fetch({"https://x/jobs/1": (200, "text/html", self.HTML)}))
+
+        self.assertEqual(result["fetched"], 1)
+        written = json.loads((index / "matches.json").read_text())
+        self.assertIsInstance(written, dict)
+        self.assertEqual(written["nMatches"], 2)
+        self.assertEqual(written["ingestDefault"], "matches")
+        self.assertEqual([j["title"] for j in written["jobs"]],
+                         ["Senior PM", "No URL Job"])
+        self.assertIn("payments infrastructure",
+                      written["jobs"][0]["description"])
+
+    def test_load_matches_normalizes_both_shapes(self):
+        # #32: one loader for the shared artifact so no caller needs a
+        # type conditional or ad-hoc ["jobs"] indexing.
+        from network_jobs.matches import MatchesFormatError, load_matches
+
+        tmp = Path(tempfile.mkdtemp(prefix="nj-matches-load-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        rows = [{"title": "Senior PM", "externalId": "1"},
+                {"title": "Staff PM", "externalId": "2"}]
+
+        legacy_path = tmp / "legacy.json"
+        legacy_path.write_text(json.dumps(rows) + "\n")
+        object_path = tmp / "object.json"
+        object_path.write_text(json.dumps({
+            "jobs": rows,
+            "nMatches": 2,
+            "ingestDefault": "matches",
+        }) + "\n")
+
+        legacy = load_matches(legacy_path)
+        current = load_matches(object_path)
+        self.assertIsInstance(legacy, dict)
+        self.assertEqual(legacy, current)
+        self.assertEqual(legacy["jobs"], rows)
+
+        broken = tmp / "broken.json"
+        broken.write_text(json.dumps({"results": rows}) + "\n")
+        with self.assertRaises(MatchesFormatError):
+            load_matches(broken)
+
+    def test_review_matches_veto_keeps_descriptions(self):
+        # #32/#24: --veto re-scores from listings.json. It must carry the
+        # bodies across first, or the rewrite silently empties them.
+        import contextlib
+        import io
+        from network_jobs.descriptions import fetch_descriptions
+
+        tmp = Path(tempfile.mkdtemp(prefix="nj-review-desc-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        triage = tmp / "triage" / "careers-example-2026-09-16"
+        (triage / "index").mkdir(parents=True)
+        shutil.copy(FIXTURES / "listings-prefs.json",
+                    triage / "index" / "listings.json")
+        (triage / "INVENTORY.md").write_text(
+            "# Careers triage — Example\n\n- **Slug:** example\n")
+        data = tmp / "data"
+        (data / "resume").mkdir(parents=True)
+        shutil.copy(FIXTURES / "preferences.json", data / "preferences.json")
+        shutil.copy(FIXTURES / "resume-keywords.md",
+                    data / "resume" / "text.md")
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = helper_main(["match-prefs", "--triage-dir", str(triage),
+                              "--data", str(data), "--company", "Example"])
+        self.assertEqual(rc, 0)
+        fetched = fetch_descriptions(
+            triage, fetch=lambda url: (200, "text/html", self.HTML.encode()))
+        self.assertGreater(fetched["fetched"], 0)
+
+        # A veto that is already satisfied leaves the shortlist intact, so
+        # there are rows whose bodies must survive the rewrite.
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = helper_main(["review-matches", "--triage-dir", str(triage),
+                              "--data", str(data), "--company", "Example",
+                              "--veto", "crypto trading", "--json"])
+        self.assertEqual(rc, 0)
+
+        written = json.loads((triage / "index" / "matches.json").read_text())
+        self.assertIsInstance(written, dict)
+        self.assertEqual(written["nMatches"], fetched["fetched"])
+        described = [j for j in written["jobs"] if j.get("description")]
+        self.assertEqual(len(described), fetched["fetched"])
+        for job in described:
+            self.assertIn("payments infrastructure", job["description"])
+            self.assertTrue(job.get("descriptionSource"))
+
+    def test_descriptions_survive_second_pipeline_pass(self):
+        # #32 / #24: the documented order is match-prefs -> fetch-descriptions,
+        # and users re-run it. A second pass must keep the object shape, keep
+        # bodies byte-identical, and restore (not re-fetch) them.
+        import contextlib
+        import io
+        from network_jobs.descriptions import fetch_descriptions
+
+        tmp = Path(tempfile.mkdtemp(prefix="nj-desc-twice-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        triage = tmp / "triage" / "careers-example-2026-09-16"
+        (triage / "index").mkdir(parents=True)
+        shutil.copy(FIXTURES / "listings-prefs.json",
+                    triage / "index" / "listings.json")
+        (triage / "INVENTORY.md").write_text(
+            "# Careers triage — Example\n\n- **Slug:** example\n")
+        data = tmp / "data"
+        (data / "resume").mkdir(parents=True)
+        shutil.copy(FIXTURES / "preferences.json", data / "preferences.json")
+        shutil.copy(FIXTURES / "resume-keywords.md",
+                    data / "resume" / "text.md")
+
+        def run_match_prefs():
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                rc = helper_main([
+                    "match-prefs", "--triage-dir", str(triage),
+                    "--data", str(data), "--company", "Example",
+                ])
+            self.assertEqual(rc, 0)
+            return json.loads(stdout.getvalue())
+
+        always_html = lambda url: (200, "text/html", self.HTML.encode())  # noqa: E731
+
+        first = run_match_prefs()
+        n_matches = first["matches"]
+        self.assertGreater(n_matches, 0)
+
+        fetched = fetch_descriptions(triage, fetch=always_html)
+        self.assertEqual(fetched["fetched"], n_matches)
+        self.assertEqual(fetched["failed"], 0)
+
+        after_first = json.loads((triage / "index" / "matches.json").read_text())
+        self.assertIsInstance(after_first, dict)
+        described = {j["title"]: j for j in after_first["jobs"]
+                     if j.get("description")}
+        self.assertEqual(len(described), n_matches)
+        bodies = {t: j["description"] for t, j in described.items()}
+        sources = {t: j["descriptionSource"] for t, j in described.items()}
+
+        # Re-score: bodies must be carried forward from matches.json (#24),
+        # not lost with the regenerated shortlist.
+        second = run_match_prefs()
+        self.assertEqual(second["matches"], n_matches)
+        self.assertEqual(second["restoredDescriptions"], n_matches)
+
+        after_second = json.loads((triage / "index" / "matches.json").read_text())
+        self.assertIsInstance(after_second, dict)
+        still = {j["title"]: j for j in after_second["jobs"]
+                 if j.get("description")}
+        self.assertEqual({t: j["description"] for t, j in still.items()}, bodies)
+        self.assertEqual({t: j["descriptionSource"] for t, j in still.items()},
+                         sources)
+        for job in still.values():
+            self.assertTrue(job.get("descriptionFetchedAt"))
+
+        # Second fetch pass: nothing left to fetch, nothing rewritten to loss.
+        again = fetch_descriptions(triage, fetch=always_html)
+        self.assertEqual(again["fetched"], 0)
+        self.assertEqual(again["failed"], 0)
+
+        final = json.loads((triage / "index" / "matches.json").read_text())
+        self.assertIsInstance(final, dict)
+        self.assertEqual({j["title"]: j["description"] for j in final["jobs"]
+                          if j.get("description")}, bodies)
 
     def test_must_haves_fire_on_description_not_title(self):
         # #21: aspirational phrases are dead against title-only blobs;
