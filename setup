@@ -442,10 +442,26 @@ fi
 echo
 echo "Next:"
 step=1
-if command -v network-jobs >/dev/null 2>&1; then
-  cli_invocation="network-jobs"
-else
+# Prefer the CLI this run installed. `command -v network-jobs` misses the
+# launcher when its directory is not on PATH yet — the ordinary first run — and
+# the steps then told the user to `npx @latest` past the suite setup had just
+# resolved. Use the launcher's absolute path in that case so the printed
+# commands work as-is.
+nj_cli=""
+if [[ -n "${existing_cli:-}" ]]; then
+  nj_cli="$existing_cli"
+elif [[ -n "${launcher_dir:-}" && -x "$launcher_dir/network-jobs" ]]; then
+  nj_cli="$launcher_dir/network-jobs"
+elif command -v network-jobs >/dev/null 2>&1; then
+  nj_cli="$(command -v network-jobs)"
+fi
+if [[ -z "$nj_cli" ]]; then
   cli_invocation="npx --yes @hirefrank/network-jobs@latest"
+else
+  case ":$PATH:" in
+    *":$(dirname "$nj_cli"):"*) cli_invocation="network-jobs" ;;
+    *) cli_invocation="$(printf '%q' "$nj_cli")" ;;
+  esac
 fi
 
 has_resume=0

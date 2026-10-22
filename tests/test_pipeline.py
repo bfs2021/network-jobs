@@ -3760,6 +3760,56 @@ class AgentBrowserVersionFloorTests(unittest.TestCase):
         self.assertNotIn("@latest", proc.stdout)
 
 
+class SetupNextStepsTests(unittest.TestCase):
+    """`Next:` must point at the CLI setup itself just installed.
+
+    setup writes the launcher to ~/.local/bin, which is usually not on PATH on
+    a first run. A bare `command -v network-jobs` therefore missed it and the
+    steps fell back to `npx --yes …@latest`, routing the user around the copy
+    that had just been resolved.
+    """
+
+    def _run(self, home: Path, path: str):
+        import subprocess
+
+        env = dict(os.environ)
+        env.update({"HOME": str(home),
+                    "NETWORK_JOBS_HOME": str(home / "data"),
+                    "PATH": path})
+        return subprocess.run(
+            ["bash", f"{ROOT}/setup", "--agent", "claude-code", "--no-browser"],
+            capture_output=True, text=True, env=env, timeout=180)
+
+    def test_launcher_off_path_is_called_by_absolute_path(self):
+        tmp = Path(tempfile.mkdtemp(prefix="nj-setup-next-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        home = tmp / "home"
+        home.mkdir()
+
+        # ~/.local/bin is deliberately missing from PATH: the first-run case.
+        proc = self._run(home, os.environ["PATH"])
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        launcher = home / ".local" / "bin" / "network-jobs"
+        self.assertTrue(launcher.exists(), proc.stdout)
+        self.assertIn(f"{launcher} profile import", proc.stdout)
+        self.assertNotIn("npx --yes @hirefrank/network-jobs@latest", proc.stdout)
+
+    def test_launcher_on_path_uses_the_bare_command(self):
+        tmp = Path(tempfile.mkdtemp(prefix="nj-setup-next-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        home = tmp / "home"
+        (home / ".local" / "bin").mkdir(parents=True)
+        path = f"{home / '.local' / 'bin'}{os.pathsep}{os.environ['PATH']}"
+
+        proc = self._run(home, path)
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("network-jobs profile import", proc.stdout)
+        self.assertNotIn(f"{home / '.local' / 'bin' / 'network-jobs'} profile import",
+                         proc.stdout)
+
+
 class InventoryPipelineTests(unittest.TestCase):
     """#33: the INVENTORY header is owned by the helpers, not by the model."""
 

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Changed
+- `setup`'s `Next:` steps now point at the CLI it just installed. The launcher
+  lands in `~/.local/bin`, which is normally not on `PATH` on a first run, so
+  `command -v network-jobs` missed it and the steps fell back to `npx --yes
+  @hirefrank/network-jobs@latest` — re-fetching the suite setup had just
+  resolved. Off-PATH installs now print the launcher's absolute path (quote-safe);
+  installs whose directory is on `PATH` keep the bare `network-jobs`.
+
 ### Fixed
 - `docs/RELEASE.md` verification steps used `npm view
   @hirefrank/network-jobs/latest version`, which npm parses as a **path** and
