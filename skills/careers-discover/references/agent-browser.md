@@ -44,25 +44,28 @@ agent-browser eval 'document.querySelectorAll("a[href*=job]").length'
 ## Network inspection (the useful part for careers pages)
 
 ```bash
-agent-browser network requests                  # URL + method + status per call
+agent-browser network requests                   # URL + method + status per call
 agent-browser network requests --filter graphql  # narrow by pattern
-agent-browser network requests --clear          # reset before a reload
+agent-browser network requests --clear           # reset before a reload
+agent-browser network request <id>               # full request + response, including the body
 ```
 
-`network requests` lists URLs and statuses but **not request bodies**, so it
-tells you whether a board fetches a jobs API but not what it POSTs.
+`network requests` is the index (URL, method, status). To see what a board
+POSTed (form-encoded or JSON payloads, signed GraphQL variables), take an id
+from that list and run `agent-browser network request <id>` — 0.39.1 prints
+the full request and response, including the body.
 
-To capture bodies (form-encoded or JSON payloads, signed GraphQL variables),
-record a HAR:
+If you need a file that survives navigation and close, record a HAR as the
+fallback:
 
 ```bash
 agent-browser network har start
 agent-browser open "https://example.com/jobs"   # trigger the requests
-agent-browser network har stop ./capture.har    # path belongs to stop, not start
+agent-browser network har stop ./capture.har    # path belongs on stop
 ```
 
-Without an explicit path, `stop` writes to `~/.agent-browser/tmp/har/` and
-prints where. `start` ignores a path argument.
+Without an explicit path, `stop` writes a temp file and prints where; check
+the CLI output for the path.
 
 ## When to use it at all
 
