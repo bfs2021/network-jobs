@@ -856,6 +856,10 @@ def cmd_rebuild(args: argparse.Namespace) -> int:
         expected_total=args.expect_count,
         force_expire=args.force_expire,
     )
+    if (summary.get("expirySkipped")
+            and (args.pagination_status or "") == "empty"
+            and summary.get("expiryReason")):
+        print(f"warning: {summary['expiryReason']}", file=sys.stderr)
     _dump(summary if args.verbose else {
         "totalJobs": summary["totalJobs"],
         "incoming": summary["incoming"],
@@ -1263,7 +1267,8 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--expect-count", type=int, default=None,
                    help="board listing count: skip expiry when the batch is a strict subset (filtered ingest)")
     b.add_argument("--force-expire", action="store_true",
-                   help="expire even on a subset batch (operator override)")
+                   help="expire even on a subset batch or an empty crawl that "
+                        "would drop prior open roles (operator override)")
     b.set_defaults(func=cmd_rebuild)
 
     c = sub.add_parser("classify", help="title/department → category, track, seniority")
