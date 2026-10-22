@@ -413,6 +413,7 @@ Search ranker: `skills/network-jobs/helpers/rank-jobs.py` writes `search/ranked.
   "query": "senior pm nyc",
   "shards": ["product-nyc-senior.json"],
   "staleHidden": 12,
+  "companyCap": { "limit": 3, "skipped": 39 },
   "jobs": []
 }
 ```
@@ -420,6 +421,12 @@ Search ranker: `skills/network-jobs/helpers/rank-jobs.py` writes `search/ranked.
 - `staleHidden` — postings excluded as stale: `postedAt` older than 90 days, or
   no `postedAt` and `lastSeen` older than 120 days. Re-run rank with
   `--include-stale` to see them (they carry `"stale": true` and sort last).
+- `companyCap` — present **only** when the per-company cap is what stopped the
+  shortlist reaching `k`: `limit` is the cap in force, `skipped` how many
+  candidates it withheld. A `showing` of `3 of 430` under a `companyCap` means
+  "3 shown, rest held by the cap", **not** "only 3 match". Surface it as its own
+  line rather than folding it into `showing`, and remember `--company-cap 0`
+  reveals the withheld ones. Absent when the shortlist filled normally.
 - Recency boost: postings from the last 14 days get +2 (`matchReasons` gains
   `recent`), last 30 days get +1.
 - Company cap: at most 3 jobs per company in the top-K shortlist
