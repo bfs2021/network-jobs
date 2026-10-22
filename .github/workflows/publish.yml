@@ -24,12 +24,12 @@ jobs:
       contents: read
       id-token: write # OIDC token for trusted publishing
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # Trusted publishing needs npm >= 11.5.1; Node 24 ships 11.x.
       # Deliberately no registry-url: setup-node would write an .npmrc with
       # an unset ${NODE_AUTH_TOKEN}, which breaks the OIDC path.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 24
 
