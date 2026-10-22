@@ -4,8 +4,6 @@ Local-first agent skill suite: import your resume and preferences, import Linked
 
 Works with any agent that loads [Agent Skills](https://agentskills.io) (Claude Code, Cursor, Codex, OpenCode, Muse, Pi, Gemini CLI, Grok Bot, and others).
 
-**Hosted legacy (retired 2026-10-04):** `jobs.hirefrank.com` returns HTTP 410 with install hints. Deploy the sunset worker from [`worker/`](worker/) (`bun run deploy`). Ops: [worker/SUNSET.md](worker/SUNSET.md) · [docs/DECOMMISSION.md](docs/DECOMMISSION.md).
-
 ## For agents
 
 If you're an agent working from this repo rather than a human reading it:
@@ -174,10 +172,6 @@ SUITE="$(network-jobs which | sed -n 's/^suite=//p')"   # fixtures ship in the s
 network-jobs import "$SUITE/fixtures/Connections.csv"
 python3 "$SUITE/tests/test_pipeline.py"   # prefs, ranker, pagination, fingerprint, classifier, crawl, intros
 ```
-
-## Decommissioning the old Workers app
-
-See [docs/DECOMMISSION.md](docs/DECOMMISSION.md).
 
 ## License
 

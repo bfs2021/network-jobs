@@ -51,6 +51,13 @@ Until that entry exists the workflow fails at the publish step and nothing
 ships — the manual path below still works. To roll back, delete the trusted
 publisher entry; CI publishes then fail closed.
 
+> **Open follow-up (2026-10-22):** after the first green CI release, switch
+> **Publishing access** on npmjs.com to *“Require two-factor authentication and
+> disallow bypass 2fa tokens (recommended)”*. Trusted publishing is unaffected;
+> this closes the legacy bypass-token path before the Jan 2027 deprecation.
+> Deliberately not done yet, so the manual fallback still works while CI is
+> being proven.
+
 ## Manual publish (fallback)
 
 Use when Actions is unavailable or trusted publishing has been removed.

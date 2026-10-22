@@ -17,6 +17,6 @@
 - Skills live under `skills/`; install via `npx skills add hirefrank/network-jobs` and/or `network-jobs setup --agent`.
 - Clone or install the suite as `network-jobs-suite` (not `network-jobs`) so the `network-jobs` skill can be symlinked without path collision.
 - Pipeline is import → careers-discover (stage only) → user confirm → jobs-ingest → search → warm intro; never invent job fields; the suite has no hosted API (local files only).
-- Scraping-skill patterns are modeled after `~/Projects/provenance`; hosted sunset Worker source is `worker/` (`jobs-api` on `jobs.hirefrank.com`). Checklist: `docs/DECOMMISSION.md`.
+- Scraping-skill patterns are modeled after `~/Projects/provenance`; the hosted 410 Worker source is `worker/` (`jobs-api` on `jobs.hirefrank.com`), with ops notes in `worker/SUNSET.md`.
 - Setup links the same skill set into multiple agent skill dirs (claude-code, cursor, codex, opencode, pi, gemini-cli, hermes-agent, muse, agents), typically via symlinks re-pointed on re-setup.
 - Install with `npm i -g @hirefrank/network-jobs@latest && network-jobs setup --agent auto` (registry primary; `npx --yes @hirefrank/network-jobs@latest setup …` for zero-install; `npx --yes 'github:hirefrank/network-jobs#main' …` only for bleeding edge — use `#main`, not `@main`); setup should place the CLI on PATH under `~/.local/bin`.

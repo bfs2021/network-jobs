@@ -19,9 +19,7 @@ bun run deploy
 
 ## Documentation
 
-- [`SUNSET.md`](./SUNSET.md) — history and verification curls
-- [`../docs/DECOMMISSION.md`](../docs/DECOMMISSION.md) — checklist
-- [`../docs/hosted-d1-export.md`](../docs/hosted-d1-export.md) — archived D1 backup notes
+- [`SUNSET.md`](./SUNSET.md) — history, D1 export note, and verification curls
 
 ## Done checklist
 
