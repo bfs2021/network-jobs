@@ -15,6 +15,8 @@ ROOT="$(cd "$(dirname "$_SOURCE")/.." && pwd)"
 unset _SOURCE _DIR
 # shellcheck source=lib/agents.sh
 source "$ROOT/lib/agents.sh"
+# shellcheck source=lib/browser.sh
+source "$ROOT/lib/browser.sh"
 
 DATA_HOME="${NETWORK_JOBS_HOME:-$HOME/.network-jobs}"
 export NETWORK_JOBS_SUITE="${NETWORK_JOBS_SUITE:-$ROOT}"
@@ -783,7 +785,14 @@ cmd_doctor() {
     fi
   done
   if command -v agent-browser >/dev/null 2>&1; then
-    echo "OK  agent-browser"
+    local ab_have ab_min
+    ab_have="$(ab_installed_version || true)"
+    ab_min="$(ab_min_version "$ROOT/package.json" || true)"
+    if [[ -n "$ab_have" && -n "$ab_min" ]] && ! ab_version_ge "$ab_have" "$ab_min"; then
+      echo "WARN agent-browser $ab_have < $ab_min — network-jobs update   (or: npm i -g agent-browser@latest)"
+    else
+      echo "OK  agent-browser ${ab_have:-}"
+    fi
   elif [[ -f "$DATA_HOME/config/no-browser" ]]; then
     echo "OK  agent-browser skipped (setup --no-browser)"
   else

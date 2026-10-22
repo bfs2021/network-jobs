@@ -153,7 +153,7 @@ cat "$DATA/profile.json"
 cat "$DATA/preferences.json" 2>/dev/null || true
 ls -la "$DATA/resume" 2>/dev/null || true
 command -v curl jq unzip
-command -v agent-browser || echo "agent-browser missing — network-jobs update"
+command -v agent-browser >/dev/null && agent-browser --version || echo "agent-browser missing — network-jobs update"
 command -v network-jobs || echo "network-jobs CLI missing — re-run setup"
 ```
 
