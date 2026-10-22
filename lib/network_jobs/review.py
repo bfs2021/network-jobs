@@ -68,9 +68,11 @@ def cluster_matches(
 ) -> list[dict[str, Any]]:
     """Group matched jobs into families, biggest first.
 
-    Each family: category, stem, count, median score, locations observed,
-    and up to 3 sample titles. Families below min_cluster members fold
-    into a single "(smaller families)" bucket so the review stays short.
+    Each family: category, stem, label, suggestedVeto, count, median score,
+    locations observed, and up to 3 sample titles. Families below min_cluster
+    members fold into a single "(smaller families)" bucket so the review stays
+    short; the bucket carries the same keys (with `suggestedVeto=None`) so
+    `--json` consumers and printers see one consistent shape (#30).
     """
     groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for job in matches:
@@ -110,6 +112,8 @@ def cluster_matches(
         fams.append({
             "category": "(mixed)",
             "stem": "(smaller families)",
+            "label": "(smaller families)",
+            "suggestedVeto": None,
             "count": len(small),
             "medianScore": round(median(scores), 2) if scores else 0,
             "locations": [],
