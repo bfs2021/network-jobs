@@ -804,6 +804,29 @@ class ClassifierLocationTests(unittest.TestCase):
         self.assertEqual(written["ingestDefault"], "matches")
         self.assertEqual(written["jobs"][0]["category"], "product")
 
+    def test_classify_without_out_then_rebuild(self):
+        # classify with no --out wraps a plain job list in the matches object.
+        # rebuild-corpus used to reject that file with "must be a JSON array".
+        tmp = Path(tempfile.mkdtemp(prefix="nj-clf-rebuild-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        batch = tmp / "batch.json"
+        batch.write_text(json.dumps([
+            {"title": "Senior Product Manager", "location": "New York, NY",
+             "company": "Stripe", "url": "https://stripe.com/jobs/pm"},
+        ]) + "\n")
+
+        rc = helper_main(["classify", "--input", str(batch), "--company", "Stripe"])
+        self.assertEqual(rc, 0)
+        wrapped = json.loads(batch.read_text())
+        self.assertIsInstance(wrapped, dict)
+        self.assertIsInstance(wrapped.get("jobs"), list)
+
+        rc = helper_main(["rebuild", str(batch), "--data", str(tmp)])
+        self.assertEqual(rc, 0)
+        corpus_jobs = json.loads((tmp / "corpus" / "jobs-all.json").read_text())
+        self.assertEqual(len(corpus_jobs), 1)
+        self.assertEqual(corpus_jobs[0]["title"], "Senior Product Manager")
+
     def test_classify_rejects_unrecognised_shape(self):
         tmp = Path(tempfile.mkdtemp(prefix="nj-clf-bad-"))
         self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
