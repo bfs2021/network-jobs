@@ -2018,6 +2018,15 @@ class FetchDescriptionsTests(unittest.TestCase):
         headers["Retry-After"] = value
         return headers
 
+    @staticmethod
+    def _bot_wall_headers(retry_after=None):
+        headers = Message()
+        headers["Server"] = "CloudFront"
+        headers["x-sigsci-request-id"] = "req-1"
+        if retry_after is not None:
+            headers["Retry-After"] = retry_after
+        return headers
+
     def test_strip_html_keeps_prose_drops_chrome(self):
         from network_jobs.descriptions import strip_html
 
@@ -2072,6 +2081,18 @@ class FetchDescriptionsTests(unittest.TestCase):
         (index / "matches.json").write_text(json.dumps([
             {"title": f"Senior PM {i}", "url": f"https://x/jobs/{i}"}
             for i in range(1, n + 1)
+        ]) + "\n")
+        return tmp / "triage" / "t"
+
+    def _triage_for(self, urls):
+        """Triage dir whose rows point at the given URLs, in order."""
+        tmp = Path(tempfile.mkdtemp(prefix="nj-desc-web-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        index = tmp / "triage" / "t" / "index"
+        index.mkdir(parents=True)
+        (index / "matches.json").write_text(json.dumps([
+            {"title": f"Senior PM {i}", "url": url}
+            for i, url in enumerate(urls, 1)
         ]) + "\n")
         return tmp / "triage" / "t"
 
@@ -2333,6 +2354,160 @@ class FetchDescriptionsTests(unittest.TestCase):
         # 1.0 is the retry backoff for job 1; 0.25 is the host pause before
         # job 2. The pacing sleep sits between the two jobs, not in a retry.
         self.assertEqual(sleeps, [1.0, 0.25])
+
+    def test_bot_wall_signature_detection(self):
+        # #67: only the CDN-shaped 403 is a wall. A bare 403 is a dead role.
+        from network_jobs.descriptions import fetch_job_description
+
+        sigsci = Message()
+        sigsci["x-sigsci-request-id"] = "abc123"
+        cloudfront = Message()
+        cloudfront["Server"] = "cloudfront"
+
+        for headers in (sigsci, cloudfront, self._bot_wall_headers()):
+            def fetch(url, headers=headers):
+                raise self._http_error(url, 403, "blocked", headers)
+
+            self.assertEqual(
+                fetch_job_description("https://x/jobs/1", fetch=fetch),
+                {"error": "http-403", "botWall": True})
+
+        def bare(url):
+            raise self._http_error(url, 403, "forbidden")
+
+        self.assertEqual(
+            fetch_job_description("https://x/jobs/1", fetch=bare),
+            {"error": "http-403"})
+
+    def test_bare_403_stays_single_shot(self):
+        # The local bare-403 contract from the #65 review must not weaken.
+        from network_jobs.descriptions import fetch_descriptions
+
+        triage = self._retry_triage()
+        calls = []
+        sleeps = []
+
+        def fetch(url):
+            calls.append(url)
+            raise self._http_error(url, 403, "forbidden")
+
+        result = fetch_descriptions(
+            triage, fetch=fetch, sleep=lambda s: sleeps.append(s))
+
+        self.assertEqual(result["fetched"], 0)
+        self.assertEqual(result["failed"], 1)
+        self.assertEqual(result["errors"], ["https://x/jobs/1: http-403"])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(sleeps, [])
+        self.assertNotIn("botWalled", result)
+
+    def test_bot_wall_honors_retry_after(self):
+        # A 403 that does carry Retry-After uses it, not the 30s default.
+        from network_jobs.descriptions import fetch_descriptions
+
+        triage = self._retry_triage()
+        calls = []
+        sleeps = []
+
+        def fetch(url):
+            calls.append(url)
+            if len(calls) == 1:
+                raise self._http_error(
+                    url, 403, "blocked",
+                    self._bot_wall_headers(retry_after="7"))
+            return 200, "text/html", self.HTML.encode()
+
+        result = fetch_descriptions(
+            triage, fetch=fetch, sleep=lambda s: sleeps.append(s))
+
+        self.assertEqual(result["fetched"], 1)
+        self.assertEqual(result["failed"], 0)
+        self.assertEqual(sleeps, [7.0])
+
+    def test_bot_wall_403_retries_through_real_urlopen(self):
+        # #67: a CloudFront 403 from the real urlopen is retried after the
+        # long cooldown, and the retried body is written. The next job on
+        # that host is paced even though the retry succeeded.
+        import http.server
+        import threading
+        from network_jobs.descriptions import fetch_descriptions
+
+        hits = []
+        html = self.HTML.encode()
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            server_version = "CloudFront"
+            sys_version = ""
+
+            def do_GET(self):
+                hits.append(self.path)
+                if len(hits) == 1:
+                    self.send_response(403)
+                    self.send_header("x-sigsci-request-id", "req-1")
+                    self.send_header("Content-Type", "text/html")
+                    self.end_headers()
+                    self.wfile.write(b"<html>blocked</html>")
+                else:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html")
+                    self.send_header("Content-Length", str(len(html)))
+                    self.end_headers()
+                    self.wfile.write(html)
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        triage = self._triage_for([f"{base}/jobs/1", f"{base}/jobs/2"])
+        sleeps = []
+
+        result = fetch_descriptions(
+            triage, host_delay=0.25, sleep=lambda s: sleeps.append(s))
+
+        self.assertEqual(result["fetched"], 2)
+        self.assertEqual(result["failed"], 0)
+        self.assertNotIn("botWalled", result)
+        self.assertEqual(hits, ["/jobs/1", "/jobs/1", "/jobs/2"])
+        # 30s is the first bot-wall cooldown; 0.25 is the host pause that
+        # follows the wall even though the retried request succeeded.
+        self.assertEqual(sleeps, [30.0, 0.25])
+        rows = json.loads((triage / "index" / "matches.json").read_text())
+        self.assertIn("payments infrastructure",
+                      rows["jobs"][0]["description"])
+        self.assertIn("payments infrastructure",
+                      rows["jobs"][1]["description"])
+
+    def test_sustained_bot_wall_blocks_the_host(self):
+        # #67: a wall that survives both cooldowns must not cost 39 x 90s.
+        from network_jobs.descriptions import fetch_descriptions
+
+        triage = self._retry_triage(3)
+        calls = []
+        sleeps = []
+
+        def fetch(url):
+            calls.append(url)
+            raise self._http_error(
+                url, 403, "blocked", self._bot_wall_headers())
+
+        result = fetch_descriptions(
+            triage, fetch=fetch, host_delay=0.25,
+            sleep=lambda s: sleeps.append(s))
+
+        self.assertEqual(result["fetched"], 0)
+        self.assertEqual(result["failed"], 3)
+        self.assertTrue(result["botWalled"])
+        self.assertNotIn("retriesDisabled", result)
+        # job 1: original + two cooldown retries; jobs 2-3: one attempt each,
+        # each behind the host pause.
+        self.assertEqual(len(calls), 5)
+        self.assertEqual(sleeps, [30.0, 60.0, 0.25, 0.25])
+        self.assertEqual(set(result), {"fetched", "skipped", "failed",
+                                       "errors", "out", "botWalled"})
 
     def test_all_failing_board_disables_retries(self):
         # #64 review: without a run-level budget an all-failing board makes
