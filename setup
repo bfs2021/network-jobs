@@ -254,13 +254,7 @@ fi
 # keeps working even after an npx store path is garbage collected.
 launcher_note=""
 if [[ "$INSTALL_LAUNCHER" -eq 1 ]]; then
-  launcher_dir=""
-  for candidate in "$HOME/.local/bin" "$HOME/bin"; do
-    case ":$PATH:" in
-      *":$candidate:"*) launcher_dir="$candidate"; break ;;
-    esac
-  done
-  [[ -z "$launcher_dir" ]] && launcher_dir="$HOME/.local/bin"
+  launcher_dir="$(network_jobs_launcher_dir)"
 
   # A package runner (pnpm dlx / npx) prepends its own temporary node_modules/.bin
   # to PATH, so `command -v` finds a network-jobs that vanishes when we exit.

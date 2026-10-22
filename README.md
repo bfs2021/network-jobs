@@ -159,7 +159,7 @@ Skills self-describe for routing. `network-jobs routing` prints an optional snip
 |------|--------|
 | `corpus clear` | profile, prefs, resume, LinkedIn graph |
 | `profile clear` | corpus, LinkedIn graph (`--resume` also drops resume files) |
-| `uninstall` / `reset --data` | nothing under `~/.network-jobs/` |
+| `uninstall` / `reset --data` | nothing under `~/.network-jobs/` — the npm package and the launcher stay installed; both commands print how to remove them |
 
 ## Design notes
 

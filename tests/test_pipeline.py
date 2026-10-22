@@ -4141,10 +4141,15 @@ class ResetRemovalHintTests(unittest.TestCase):
         entry.symlink_to("../lib/node_modules/@hirefrank/network-jobs/bin/network-jobs")
         return entry
 
-    def _home_with_launcher(self, tmp: Path) -> Path:
-        launcher = tmp / "home" / ".local" / "bin" / "network-jobs"
+    def _home_with_launcher(self, tmp: Path, subdir: str = ".local/bin",
+                            marker: bool = True) -> Path:
+        launcher = tmp / "home" / subdir / "network-jobs"
         launcher.parent.mkdir(parents=True, exist_ok=True)
-        launcher.write_text("#!/usr/bin/env bash\necho shim\n")
+        body = "#!/usr/bin/env bash\n"
+        if marker:
+            body += "# network-jobs launcher — resolves the installed suite\n"
+        body += "echo shim\n"
+        launcher.write_text(body)
         launcher.chmod(0o755)
         return launcher
 
@@ -4165,6 +4170,88 @@ class ResetRemovalHintTests(unittest.TestCase):
         # Printed, never run.
         self.assertTrue(launcher.exists(), "reset must not delete the launcher")
         self.assertFalse(data.exists(), "reset --data should wipe the data dir")
+
+    def test_purge_step_uses_resolved_path_not_the_launcher(self):
+        # After --data the launcher would fall back to `npx @latest`, refilling
+        # the cache the step is meant to purge.
+        tmp = Path(tempfile.mkdtemp(prefix="nj-reset-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        entry = self._npm_layout(tmp)
+        self._home_with_launcher(tmp)
+        data = tmp / "data"
+        data.mkdir()
+
+        proc = self._run([entry, "reset", "--yes", "--data", "--agent", "claude-code"],
+                         tmp / "home", data)
+
+        resolved = tmp / "prefix" / "lib" / "node_modules" / "@hirefrank" / "network-jobs"
+        self.assertIn(f"{resolved}/bin/network-jobs reset --yes --purge-cache", proc.stdout)
+        self.assertNotIn("  network-jobs reset --yes --purge-cache", proc.stdout)
+
+    def test_launcher_in_home_bin_is_found(self):
+        # setup installs to ~/bin when ~/.local/bin is not on PATH.
+        tmp = Path(tempfile.mkdtemp(prefix="nj-reset-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        entry = self._npm_layout(tmp)
+        launcher = self._home_with_launcher(tmp, subdir="bin")
+        data = tmp / "data"
+        data.mkdir()
+
+        proc = self._run([entry, "reset", "--yes", "--data", "--agent", "claude-code"],
+                         tmp / "home", data)
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn(f"rm -f {launcher}", proc.stdout)
+
+    def test_launcher_path_is_shell_quoted(self):
+        tmp = Path(tempfile.mkdtemp(prefix="nj-reset-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        entry = self._npm_layout(tmp)
+        home = tmp / "h b"
+        home.mkdir()
+        launcher = self._home_with_launcher(tmp, subdir="bin")
+        # _home_with_launcher writes under tmp/home; rebuild under the spaced home.
+        spaced = home / ".local" / "bin" / "network-jobs"
+        spaced.parent.mkdir(parents=True)
+        spaced.write_text("#!/usr/bin/env bash\n# network-jobs launcher\necho shim\n")
+        spaced.chmod(0o755)
+        data = tmp / "data"
+        data.mkdir()
+
+        proc = self._run([entry, "reset", "--yes", "--data", "--agent", "claude-code"],
+                         home, data)
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("h\\ b", proc.stdout, "path with a space must be shell-quoted")
+
+    def test_foreign_file_named_network_jobs_is_not_removed(self):
+        # A user wrapper without setup's marker must not be offered for deletion.
+        tmp = Path(tempfile.mkdtemp(prefix="nj-reset-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        entry = self._npm_layout(tmp)
+        self._home_with_launcher(tmp, marker=False)
+        data = tmp / "data"
+        data.mkdir()
+
+        proc = self._run([entry, "reset", "--yes", "--data", "--agent", "claude-code"],
+                         tmp / "home", data)
+
+        self.assertNotIn("rm -f", proc.stdout)
+
+    def test_plain_reset_does_not_print_removal_hint(self):
+        tmp = Path(tempfile.mkdtemp(prefix="nj-reset-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        entry = self._npm_layout(tmp)
+        self._home_with_launcher(tmp)
+        data = tmp / "data"
+        data.mkdir()
+
+        proc = self._run([entry, "reset", "--yes", "--agent", "claude-code"],
+                         tmp / "home", data)
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertNotIn("The CLI itself is still installed", proc.stdout)
+        self.assertTrue(data.exists(), "a plain reset keeps the data dir")
 
     def test_source_checkout_does_not_suggest_npm_uninstall(self):
         tmp = Path(tempfile.mkdtemp(prefix="nj-reset-"))
@@ -4206,7 +4293,7 @@ class ResetRemovalHintTests(unittest.TestCase):
                           "--agent", "claude-code"], tmp / "home", data)
 
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertNotIn("clear cached npx/pnpm copies first", proc.stdout)
+        self.assertNotIn("--purge-cache", proc.stdout)
         self.assertIn("npm uninstall -g @hirefrank/network-jobs", proc.stdout)
 
 

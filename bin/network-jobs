@@ -701,7 +701,9 @@ cmd_reset() {
   else
     echo "Re-link skills: network-jobs setup --agent auto"
   fi
-  print_cli_removal_hint "$purge_cache"
+  if [[ "$wipe_data" -eq 1 ]]; then
+    print_cli_removal_hint "$purge_cache"
+  fi
 }
 
 # Print — never run — the steps that remove the CLI itself.
@@ -714,13 +716,22 @@ cmd_reset() {
 # so the honest thing is to hand the user the exact commands.
 print_cli_removal_hint() {
   local purge_cache="${1:-0}"
-  local launcher="$HOME/.local/bin/network-jobs"
+  local launcher
 
   echo
-  echo "The CLI itself is still installed — reset removes skill links and data, not the command."
+  echo "The CLI itself is still installed — this removed skill links and data, not the command."
   echo "To remove it:"
   if [[ "$purge_cache" -ne 1 ]]; then
-    echo "  network-jobs reset --yes --purge-cache    # clear cached npx/pnpm copies first"
+    if network_jobs_is_packaged_install "$ROOT" && ! network_jobs_is_npm_global_install "$ROOT"; then
+      # This copy IS the cache entry (npx/pnpm). Invoking the launcher here would
+      # re-fetch @latest and repopulate what we are asking the user to purge, so
+      # name the directory instead.
+      printf '  rm -rf %q    # this cached copy of the suite\n' "$ROOT"
+    elif [[ -x "$ROOT/bin/network-jobs" ]]; then
+      # Resolved path, never `network-jobs` — that may be the launcher, which
+      # falls back to `npx @latest` now that suite-root is gone.
+      printf '  %q reset --yes --purge-cache    # clear cached npx/pnpm copies first\n' "$ROOT/bin/network-jobs"
+    fi
   fi
   if network_jobs_is_npm_global_install "$ROOT"; then
     if command -v npm >/dev/null 2>&1 && npm --version >/dev/null 2>&1; then
@@ -735,9 +746,9 @@ print_cli_removal_hint() {
   else
     echo "  # running from a source checkout — delete the clone when you are done"
   fi
-  if [[ -e "$launcher" || -L "$launcher" ]]; then
-    echo "  rm -f $launcher"
-  fi
+  while IFS= read -r launcher; do
+    printf '  rm -f %q\n' "$launcher"
+  done < <(network_jobs_launcher_paths)
 }
 
 cmd_update() {

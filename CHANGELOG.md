@@ -3,9 +3,9 @@
 ## Unreleased
 
 ### Fixed
-- `reset` / `uninstall` now print the two commands that actually remove the
-  CLI (`npm uninstall -g @hirefrank/network-jobs`, `rm -f ~/.local/bin/network-jobs`)
-  instead of implying a full wipe. `uninstall` was described as "Full wipe" but
+- `reset` / `uninstall` now print the commands that actually remove the CLI
+  (`npm uninstall -g @hirefrank/network-jobs`, `rm -f` on the launcher, plus a
+  cache step where one applies) instead of implying a full wipe. `uninstall` was described as "Full wipe" but
   only removed skill links and `~/.network-jobs`; the npm package and the
   launcher survived, and because the launcher falls back to
   `npx @hirefrank/network-jobs@latest`, the next invocation silently re-fetched
