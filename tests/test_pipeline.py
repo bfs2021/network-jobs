@@ -2888,6 +2888,48 @@ class PaginationNormalizeTests(unittest.TestCase):
         assert job is not None
         self.assertEqual(job["externalId"], "5211305008")
 
+    def test_short_or_slug_id_does_not_beat_requisition_id(self):
+        # #49 review: normalize_listing wrote externalId with no shape check,
+        # and ats_id() trusts externalId — so a junk `id` won and the guard in
+        # plain_id() never ran on the staging path.
+        from network_jobs.pagination import normalize_listing
+
+        base = {
+            "requisition_id": "R-12345",
+            "title": "Staff Software Engineer",
+            "absolute_url": "https://job-boards.greenhouse.io/x/jobs/9",
+            "location": {"name": "London, UK"},
+        }
+        for junk in ("1", "senior-product-manager-nyc", "n/a"):
+            job = normalize_listing({**base, "id": junk},
+                                    "https://boards-api.greenhouse.io/v1/boards/x/jobs")
+            assert job is not None
+            self.assertEqual(job["externalId"], "R-12345", f"junk id {junk!r} won")
+
+    def test_absolute_job_url_beats_job_path(self):
+        # #49 review: job_path must not outrank an absolute jobUrl.
+        from network_jobs.pagination import normalize_listing
+
+        raw = {
+            "title": "Product Manager",
+            "job_path": "/en/jobs/1/pm",
+            "jobUrl": "https://careers.x.com/jobs/1",
+            "location": "Remote",
+        }
+        job = normalize_listing(raw, "https://api.x.com/v1/search.json")
+        assert job is not None
+        self.assertEqual(job["url"], "https://careers.x.com/jobs/1")
+
+    def test_job_path_without_leading_slash_anchors_at_root(self):
+        # #49 review nit: urljoin would nest this under the search path.
+        from network_jobs.pagination import normalize_listing
+
+        raw = {"title": "Product Manager", "job_path": "en/jobs/1/pm",
+               "location": "Remote"}
+        job = normalize_listing(raw, "https://www.amazon.jobs/en/search.json")
+        assert job is not None
+        self.assertEqual(job["url"], "https://www.amazon.jobs/en/jobs/1/pm")
+
     def test_greenhouse_departments_list_mapped(self):
         # Greenhouse nests departments as [{"name": ...}]. "departments" was
         # missing from DEPT_KEYS, so department was null on every row even
