@@ -2,6 +2,12 @@
 # network-jobs-landing → Settings → Builds) watches this repo, root `site`,
 # watch paths `site/**`. Push to main to ship; avoid manual `wrangler deploy`
 # from stale checkouts.
+#
+# Branch builds: Workers Builds runs the Preview command (default
+# `npx wrangler preview`) for every non-production branch. Wrangler refuses
+# that command unless the config has a `previews` block, so without it every
+# PR build fails while main stays green. This Worker has no preview-specific
+# settings (assets and compatibility stay top level), so the block is empty.
 name = "network-jobs-landing"
 main = "src/index.ts"
 compatibility_date = "2026-09-20"
@@ -9,6 +15,7 @@ compatibility_flags = ["nodejs_compat"]
 account_id = "6034f1c5d23e5503f6573740480cf0d6"
 workers_dev = true
 preview_urls = true
+previews = { }
 
 [assets]
 directory = "./public"
