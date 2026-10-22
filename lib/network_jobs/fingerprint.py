@@ -52,17 +52,8 @@ def location_key(job: dict[str, Any]) -> str:
     return collapse_ws(str(job.get("location") or "")).lower()
 
 
-def ats_id(job: dict[str, Any]) -> str | None:
-    for key in ("externalId", "atsId", "jobId", "requisitionId", "gh_jid"):
-        value = job.get(key)
-        if value is None:
-            continue
-        text = collapse_ws(str(value))
-        if text.lower() in PLACEHOLDER_ATS_IDS:
-            continue
-        if text and not text.lower().startswith("http"):
-            return text
-    value = job.get("id")
+def _plain_id(value: Any) -> str | None:
+    """A board's plain `id`, accepted only when it looks like a real posting id."""
     if value is None:
         return None
     text = collapse_ws(str(value))
@@ -81,6 +72,35 @@ def ats_id(job: dict[str, Any]) -> str | None:
         return None
     if re.fullmatch(r"[A-Za-z0-9_-]{4,64}", text):
         return text
+    return None
+
+
+def ats_id(job: dict[str, Any]) -> str | None:
+    for key in ("externalId", "atsId", "jobId", "gh_jid"):
+        value = job.get(key)
+        if value is None:
+            continue
+        text = collapse_ws(str(value))
+        if text.lower() in PLACEHOLDER_ATS_IDS:
+            continue
+        if text and not text.lower().startswith("http"):
+            return text
+    # A per-posting `id` beats a requisition id: Greenhouse reuses one
+    # `requisition_id` across several distinct postings (per location/team),
+    # so keying identity on it collapses real jobs (#48). The shape
+    # heuristics above still apply, so a junk `id` falls through.
+    text = _plain_id(job.get("id"))
+    if text:
+        return text
+    for key in ("requisitionId", "requisition_id"):
+        value = job.get(key)
+        if value is None:
+            continue
+        text = collapse_ws(str(value))
+        if text.lower() in PLACEHOLDER_ATS_IDS:
+            continue
+        if text and not text.lower().startswith("http"):
+            return text
     return None
 
 

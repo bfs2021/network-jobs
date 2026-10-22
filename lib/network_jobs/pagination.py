@@ -25,10 +25,14 @@ LIST_KEYS = (
     "nodes", "records",
 )
 TITLE_KEYS = ("title", "jobTitle", "job_title", "name", "text", "role")
+# Canonical posting page first, apply endpoints last: an apply link 302s to an
+# application form, so fetching it never yields a JD (#48). `job_path` is the
+# board-relative canonical page some APIs emit (Amazon search.json) and is
+# absolutized against the crawled URL in normalize_listing.
 URL_KEYS = (
     "url", "absolute_url", "absoluteUrl", "hostedUrl", "hosted_url",
-    "jobUrl", "job_url", "applyUrl", "apply_url", "url_next_step",
-    "urlNextStep", "gh_src", "absolute_url",
+    "job_path", "jobUrl", "job_url", "applyUrl", "apply_url",
+    "url_next_step", "urlNextStep", "gh_src",
 )
 LOC_KEYS = ("location", "jobLocation", "job_location", "workplace", "city")
 # First non-empty candidate wins. Precedence: a key literally named
@@ -43,7 +47,14 @@ DEPT_KEYS = (
     "department", "departments", "departmentName", "department_name",
     "job_category", "jobCategory", "team", "group",
 )
-ID_KEYS = ("externalId", "atsId", "jobId", "job_id", "requisitionId", "requisition_id", "id")
+# A per-posting id wins over a requisition id. Greenhouse reuses one
+# `requisition_id` across several distinct postings (per location/team), so
+# keying identity on it collapses real jobs in the fingerprint dedupe below
+# (#48). `requisition_id` stays as a last resort for boards that emit no other id.
+ID_KEYS = (
+    "externalId", "atsId", "jobId", "job_id", "id",
+    "requisitionId", "requisition_id",
+)
 NEXT_KEYS = ("next", "nextPage", "next_page", "nextUrl", "next_url")
 CURSOR_KEYS = ("nextCursor", "next_cursor", "cursor", "pageId", "page_id", "continuationToken")
 
@@ -261,7 +272,10 @@ def normalize_listing(raw: Any, source_url: str = "") -> dict[str, Any] | None:
     title = _first(raw, TITLE_KEYS)
     if not title:
         return None
-    url = _url_from(raw)
+    # Boards may emit a board-relative canonical page (`job_path`, Amazon);
+    # resolve it against the crawled URL so staged rows always carry an
+    # absolute link (#48).
+    url = _absolute(source_url, _url_from(raw))
     loc_raw = None
     for key in LOC_KEYS:
         if raw.get(key) is not None:
