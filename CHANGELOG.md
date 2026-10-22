@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- `index/matches.json` no longer flips between the SCHEMA object and a bare
+  array depending on the last writer (#32). `fetch-descriptions` now writes
+  the object back — wrapper and summary keys preserved — instead of
+  `json.dumps(jobs)`. A legacy bare array is read and upgraded in place on
+  the next pass, so existing triage dirs keep working.
+- `review-matches --veto` no longer drops fetched JD bodies when it
+  re-scores: it carries prior descriptions onto `listings.json` the same way
+  `match-prefs` does (#24). The join also matches rows that have no
+  `company` field yet but whose scored counterpart does.
+
+### Changed
+- One shared reader for the artifact: `network_jobs.matches.load_matches()`
+  (plus `normalize_matches` / `write_matches`) is now used by
+  `fetch-descriptions`, `match-prefs`' description restore, `review-matches`,
+  and the ingest path (`classify`). No caller needs a
+  `payload["jobs"] if isinstance(payload, dict) else payload` conditional.
+- `departments` in `matches.json` stays the listing-wide histogram computed
+  by `match-prefs`. `fetch-descriptions` documents that filling `department`
+  from a JD can make it stale until the next `match-prefs` run; it is not
+  recomputed from the shortlist, which would silently change its meaning.
+
 ## v1.7.1 — 2026-10-22
 
 ### Changed

@@ -243,6 +243,17 @@ Written by `careers-discover/helpers/match-prefs.py` after extract. Score listin
 }
 ```
 
+`fetch-descriptions.py` rewrites this file in place and **keeps the object
+shape**: every summary key above is preserved untouched and only
+`description` / `descriptionFetchedAt` / `descriptionSource` (plus
+`department`, when the ATS payload provides one) are added to rows.
+`nMatches` / `showing` still describe the shortlist; `departments` stays the
+listing-wide histogram computed by `match-prefs` and can go stale after a
+department fill — re-running `match-prefs` recomputes it. Readers use
+`load_matches()` (`lib/network_jobs/matches.py`), which also accepts the
+legacy bare-array shape that older `fetch-descriptions` runs wrote and
+normalizes it to this object.
+
 ### INVENTORY.md
 
 Required. Summarize: company, careers URL used, listing count, caveats, suggested next steps.
