@@ -123,6 +123,61 @@ class ReviewMatchesTests(unittest.TestCase):
         self.assertEqual(len(mixed), 1)
         self.assertEqual(mixed[0]["count"], 1)
 
+    def test_smaller_families_bucket_has_full_family_contract(self):
+        # #30: the aggregated bucket used to omit label/suggestedVeto, so
+        # cli.py crashed with KeyError and --json drifted in shape.
+        from network_jobs.review import cluster_matches
+
+        jobs = [
+            {"title": "Senior Product Manager, Payments", "category": "product",
+             "location": "NYC", "matchScore": 12},
+            {"title": "Staff PM, Payments", "category": "product",
+             "location": "Remote", "matchScore": 10},
+            {"title": "Principal Product Manager, Payments", "category": "product",
+             "location": "NYC", "matchScore": 8},
+            # Four one-member families, all below min_cluster=2.
+            {"title": "Data Center Architect", "category": "operations",
+             "location": "Austin", "matchScore": 4},
+            {"title": "Legal Counsel", "category": "legal",
+             "location": "NYC", "matchScore": 3},
+            {"title": "Technical Recruiter", "category": "people",
+             "location": "Remote", "matchScore": 2},
+            {"title": "Account Executive", "category": "sales",
+             "location": "London", "matchScore": 1},
+        ]
+        fams = cluster_matches(jobs, min_cluster=2)
+        bucket = next(f for f in fams if f["stem"] == "(smaller families)")
+        self.assertEqual(bucket["label"], "(smaller families)")
+        self.assertIsNone(bucket["suggestedVeto"])
+        self.assertEqual(bucket["count"], 4)
+        self.assertEqual(bucket["locations"], [])
+        self.assertEqual(bucket["sampleTitles"], [])
+        self.assertEqual(bucket["category"], "(mixed)")
+        self.assertIn("medianScore", bucket)
+
+    def test_every_emitted_family_has_the_same_keys(self):
+        from network_jobs.review import cluster_matches
+
+        expected = {"category", "stem", "label", "suggestedVeto", "count",
+                    "medianScore", "locations", "sampleTitles"}
+        jobs = [
+            {"title": "Senior Product Manager, Payments", "category": "product",
+             "location": "NYC", "matchScore": 12},
+            {"title": "Staff PM, Payments", "category": "product",
+             "location": "Remote", "matchScore": 10},
+            {"title": "Data Center Architect", "category": "operations",
+             "location": "Austin", "matchScore": 4},
+            {"title": "Legal Counsel", "category": "legal",
+             "location": "NYC", "matchScore": 3},
+        ]
+        for min_cluster in (1, 2):
+            with self.subTest(min_cluster=min_cluster):
+                fams = cluster_matches(jobs, min_cluster=min_cluster)
+                self.assertTrue(fams)
+                for fam in fams:
+                    self.assertEqual(set(fam), expected)
+                    self.assertIsInstance(fam["label"], str)
+
     def test_explain_leaks_groups_vetoes_and_hard_fails(self):
         from network_jobs.review import explain_leaks
 
@@ -140,6 +195,34 @@ class ReviewMatchesTests(unittest.TestCase):
         self.assertEqual(leaks["vetoPhrases"], {"data center": 2})
         self.assertEqual(leaks["hardFailed"], 1)
         self.assertEqual(leaks["hardFailReasons"], {"category-mismatch": 1})
+
+    def test_cli_prints_smaller_families_bucket_without_crashing(self):
+        # #30 end to end: the fixture shortlist has two one-member families,
+        # so default --min-cluster 2 emits only the aggregated bucket.
+        import io
+        from contextlib import redirect_stdout
+
+        tmp = Path(tempfile.mkdtemp(prefix="nj-rev-bucket-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        triage = tmp / "triage" / "careers-example-2026-09-16"
+        (triage / "index").mkdir(parents=True)
+        shutil.copy(FIXTURES / "listings-prefs.json",
+                    triage / "index" / "listings.json")
+        data = tmp / "data"
+        data.mkdir()
+        shutil.copy(FIXTURES / "preferences.json", data / "preferences.json")
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = helper_main([
+                "review-matches",
+                "--triage-dir", str(triage),
+                "--data", str(data),
+                "--company", "Example",
+            ])
+        self.assertEqual(rc, 0)
+        text = out.getvalue()
+        self.assertIn("(smaller families) — 2", text)
+        self.assertNotIn("veto with:", text)
 
     def test_veto_rewrites_prefs_and_rematches(self):
         tmp = Path(tempfile.mkdtemp(prefix="nj-rev-"))

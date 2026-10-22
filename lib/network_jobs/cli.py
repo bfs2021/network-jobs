@@ -317,14 +317,19 @@ def cmd_review_matches(args: argparse.Namespace) -> int:
           f"(of {shown['nListings']} listings)")
     print()
     for fam in families:
-        locs = ", ".join(fam["locations"]) or "—"
-        samples = " · ".join(fam["sampleTitles"][:3])
-        print(f"  {fam['label']} — {fam['count']}")
-        print(f"    median {fam['medianScore']} · {locs}")
+        # #30: tolerate a family shape missing optional keys; the bucket and
+        # every normal family now carry them, but the printer should not be
+        # the thing that hard-crashes a review.
+        label = fam.get("label") or fam.get("stem") or "(unnamed family)"
+        locs = ", ".join(fam.get("locations") or []) or "—"
+        samples = " · ".join((fam.get("sampleTitles") or [])[:3])
+        print(f"  {label} — {fam.get('count', 0)}")
+        print(f"    median {fam.get('medianScore', 0)} · {locs}")
         if samples:
             print(f"    e.g. {samples}")
-        if fam["stem"] != "(smaller families)":
-            print(f"    veto with: --veto \"{fam['suggestedVeto']}\"")
+        veto = fam.get("suggestedVeto")
+        if veto:
+            print(f"    veto with: --veto \"{veto}\"")
     print()
     print(f"  not matched: {before['nListings'] - before['nMatches']}")
     if leaks["vetoed"]:
