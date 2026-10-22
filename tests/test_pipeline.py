@@ -757,6 +757,45 @@ class FingerprintExpiryTests(unittest.TestCase):
         self.assertFalse(info["expirySkipped"])
         self.assertEqual(info["expired"], 1)
 
+    def test_expiry_skipped_for_empty_when_status_omitted(self):
+        # The guard keys on zero incoming rows, not on --pagination-status.
+        from network_jobs.corpus import merge_jobs
+
+        existing = [
+            self._job(externalId="1", url="https://fatboard.example/jobs/1"),
+            self._job(title="Staff Engineer", externalId="2",
+                      url="https://fatboard.example/jobs/2"),
+        ]
+        merged, info = merge_jobs(
+            existing, [], expire_company="FatBoard", pagination_complete=True,
+            expected_total=0)
+        self.assertTrue(info["expirySkipped"])
+        self.assertEqual(info["expired"], 0)
+        self.assertIn("2 open roles", info["expiryReason"])
+        statuses = {j["externalId"]: j.get("status", "open") for j in merged}
+        self.assertEqual(statuses["1"], "open")
+        self.assertEqual(statuses["2"], "open")
+
+    def test_expiry_skipped_for_empty_when_status_null(self):
+        # jq -r '.status' on an older pagination.json with no status field
+        # prints the string "null".
+        from network_jobs.corpus import merge_jobs
+
+        existing = [
+            self._job(externalId="1", url="https://fatboard.example/jobs/1"),
+            self._job(title="Staff Engineer", externalId="2",
+                      url="https://fatboard.example/jobs/2"),
+        ]
+        merged, info = merge_jobs(
+            existing, [], expire_company="FatBoard", pagination_complete=True,
+            pagination_status="null", expected_total=0)
+        self.assertTrue(info["expirySkipped"])
+        self.assertEqual(info["expired"], 0)
+        self.assertIn("2 open roles", info["expiryReason"])
+        statuses = {j["externalId"]: j.get("status", "open") for j in merged}
+        self.assertEqual(statuses["1"], "open")
+        self.assertEqual(statuses["2"], "open")
+
     def test_expiry_proceeds_for_empty_with_force_expire(self):
         from network_jobs.corpus import merge_jobs
 
@@ -840,6 +879,29 @@ class FingerprintExpiryTests(unittest.TestCase):
         self.assertIn("force-expire", warning)
         jobs = json.loads((self.corpus / "jobs-all.json").read_text())
         self.assertEqual({j.get("status", "open") for j in jobs}, {"open"})
+
+    def test_rebuild_cli_warns_on_empty_when_status_omitted(self):
+        existing = [
+            self._job(externalId="1", url="https://fatboard.example/jobs/1"),
+        ]
+        (self.corpus / "jobs-all.json").write_text(json.dumps(existing) + "\n")
+        batch = self.tmp / "empty-batch.json"
+        batch.write_text("[]\n")
+        stdout, stderr = StringIO(), StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            rc = helper_main([
+                "rebuild", str(batch), "--data", str(self.tmp),
+                "--expire-company", "FatBoard",
+                "--pagination-complete",
+                "--expect-count", "0",
+            ])
+        self.assertEqual(rc, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertTrue(payload["expirySkipped"])
+        self.assertEqual(payload["expiredCount"], 0)
+        self.assertIn("warning:", stderr.getvalue())
+        jobs = json.loads((self.corpus / "jobs-all.json").read_text())
+        self.assertEqual(jobs[0].get("status", "open"), "open")
 
     def test_rebuild_cli_force_expire_empty_drops_prior_roles(self):
         existing = [
@@ -3965,6 +4027,8 @@ class SkillDocConsistencyTests(unittest.TestCase):
         self.assertIn("status: empty", text)
         self.assertIn("--pagination-status", text)
         self.assertIn("--force-expire", text)
+        self.assertIn("expirySkipped", text)
+        self.assertIn("expiryReason", text)
 
 
 if __name__ == "__main__":

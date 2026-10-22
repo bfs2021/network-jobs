@@ -119,11 +119,12 @@ def merge_jobs(
     `pagination_status` is the crawl headline from `index/pagination.json`.
     `blocked` (unreadable board) and `captured` (user-saved page) can never
     expire, even with `pagination_complete` set — the flag is model-supplied,
-    the status is written by the helper (#39). `empty` is a clean parsed board
-    with zero roles, but a sudden drop from N>0 prior open roles for that
-    company is skipped unless `force_expire` is set — a filtered or
-    region-limited crawl URL can look empty and would otherwise wipe the
-    company. A company that already had zero open roles may record empty.
+    the status is written by the helper (#39). A sudden drop to zero incoming
+    rows for that company, with N>0 prior open roles, is skipped unless
+    `force_expire` is set — regardless of status (omitted, the jq string
+    "null", or `empty`). A filtered or region-limited crawl URL can look
+    empty and would otherwise wipe the company. A company that already had
+    zero open roles may record empty.
 
     Fingerprint drift detection (#25): if an incoming job's externalId matches
     an existing job under a different fingerprint, we merge into the existing
@@ -190,16 +191,20 @@ def merge_jobs(
             "expiry skipped")
     elif expire_company and pagination_complete:
         prior_open = _open_count_for_company(existing, expire_company)
-        # Empty must be checked before the expect-count subset rule: an empty
-        # crawl uses expected_total=0, so len(seen) < expected_total is false
-        # and would otherwise expire every prior open role for the company.
-        if pagination_status == "empty" and not force_expire and prior_open > 0:
+        incoming_for_company = any(
+            _matches_expire_company(j, expire_company) for j in incoming
+        )
+        # Key on the data, not the status label: an omitted status or jq's
+        # "null" (older pagination.json) used to fall through and expire
+        # every prior open role. Check before the expect-count subset rule
+        # because expected_total=0 makes len(seen) < expected_total false.
+        if not force_expire and prior_open > 0 and not incoming_for_company:
             info["expirySkipped"] = True
             info["expiryReason"] = (
-                f"pagination status=empty but company had {prior_open} open "
-                f"role{'s' if prior_open != 1 else ''}: expiry skipped "
-                "(a filtered or region-limited URL can look empty; pass "
-                "--force-expire if every role really closed)")
+                f"incoming 0 rows for company but {prior_open} open "
+                f"role{'s' if prior_open != 1 else ''} already in the corpus: "
+                "expiry skipped (a filtered or region-limited URL can look "
+                "empty; pass --force-expire if every role really closed)")
         elif (expected_total is not None and not force_expire
                 and len(seen) < expected_total):
             info["expirySkipped"] = True

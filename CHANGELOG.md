@@ -20,11 +20,13 @@
   `company` field yet but whose scored counterpart does.
 
 ### Changed
-- An `empty` crawl no longer expires a company's prior open roles by
-  default. Rebuild skips expiry, prints a warning, and requires
-  `--force-expire` — a filtered or region-limited URL that returns `[]`
-  would otherwise wipe the company. A company that already had zero open
-  rows can still record empty. `blocked` / `captured` remain never-expire.
+- A crawl with zero incoming rows no longer expires a company's prior
+  open roles by default, whatever the pagination status (omitted, jq
+  `null`, or `empty`). Rebuild skips expiry, prints a warning, and
+  requires `--force-expire` — a filtered or region-limited URL that
+  returns `[]` would otherwise wipe the company. A company that already
+  had zero open rows can still record empty. `blocked` / `captured`
+  remain never-expire.
 - One shared reader for the artifact: `network_jobs.matches.load_matches()`
   (plus `normalize_matches` / `write_matches`) is now used by
   `fetch-descriptions`, `match-prefs`' description restore, `review-matches`,

@@ -85,7 +85,7 @@ python3 "$SUITE/skills/careers-discover/helpers/paginate-listings.py" \
 
      Follows `page` / `cursor` / `offset` / `links.next` generically. Writes `index/listings.json`, `index/pagination.json` (`pages`, `complete`, `truncated`, `status`), and one fetch-log metadata file **per page**. Cap `maxPages`.
 
-     `status` is `complete` (clean crawl), `truncated` (page/listing cap hit), `empty` (clean, parsed board with zero roles), `blocked` (the fetch failed or nothing parseable came back — **not** “no openings”) or `captured` (a `paginate --input` run over a user-saved page — never the whole board). `complete` / `truncated` stay the source of truth for expiry and are unchanged; `status` is the readable headline. `--input` always records `complete: false` / `status: captured`. An `empty` crawl does **not** expire prior open roles at ingest unless the operator passes `--force-expire`.
+     `status` is `complete` (clean crawl), `truncated` (page/listing cap hit), `empty` (clean, parsed board with zero roles), `blocked` (the fetch failed or nothing parseable came back — **not** “no openings”) or `captured` (a `paginate --input` run over a user-saved page — never the whole board). `complete` / `truncated` stay the source of truth for expiry and are unchanged; `status` is the readable headline. `--input` always records `complete: false` / `status: captured`. A crawl with zero incoming rows does **not** expire prior open roles at ingest unless the operator passes `--force-expire` — even if status is omitted or `null`.
    - Else parse visible listing cards / table rows (still write fetch-log before summarizing). If the board is gated and you cannot read it, stop here and use the user-capture handoff in [§3](#3-user-capture-the-default-for-gated-boards) — do not stage an empty board as success.
    - For each role capture: `title`, `url` (required), `location` and `locations[]` when shown, `department`, `externalId` if the JSON has an id, `salary` / `postedAt` only if shown, `sourceUrl`
    - Never invent ATS-specific parsers. If the helper truncates, `status` is `truncated`; if nothing parseable came back, `status` is `blocked`; if the board parses cleanly and lists zero roles, `status` is `empty`. Never pad rows from partial cards.
@@ -268,7 +268,7 @@ try WebFetch/curl
                               → stop → leave status blocked, say why
 ```
 
-Never start with agent-browser for a simple static page. Never keep retrying browser against a hard auth wall, and never report a blocked board as “no openings”. A board that parses cleanly and lists zero roles is `status: empty` — that is “no openings” on this URL. Ingest still will not expire prior open roles for that company unless you pass `--force-expire`, because a filtered or region-limited crawl can look empty.
+Never start with agent-browser for a simple static page. Never keep retrying browser against a hard auth wall, and never report a blocked board as “no openings”. A board that parses cleanly and lists zero roles is `status: empty` — that is “no openings” on this URL. Ingest still will not expire prior open roles for that company unless you pass `--force-expire`, because a filtered or region-limited crawl can look empty — even when status is omitted or `null`.
 
 ## Browser version floor
 

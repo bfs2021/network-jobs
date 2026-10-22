@@ -856,9 +856,7 @@ def cmd_rebuild(args: argparse.Namespace) -> int:
         expected_total=args.expect_count,
         force_expire=args.force_expire,
     )
-    if (summary.get("expirySkipped")
-            and (args.pagination_status or "") == "empty"
-            and summary.get("expiryReason")):
+    if summary.get("expirySkipped") and summary.get("expiryReason"):
         print(f"warning: {summary['expiryReason']}", file=sys.stderr)
     _dump(summary if args.verbose else {
         "totalJobs": summary["totalJobs"],

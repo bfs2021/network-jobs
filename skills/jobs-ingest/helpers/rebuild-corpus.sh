@@ -4,8 +4,8 @@
 # Expire/close unseen jobs for a company ONLY with --pagination-complete,
 # and never on a filtered (subset) batch unless --force-expire.
 # --pagination-status blocked|captured always refuses expiry (#39).
-# --pagination-status empty with prior open roles also refuses expiry unless
-# --force-expire (a filtered/region-limited URL can look empty).
+# Zero incoming rows with prior open roles also refuse expiry unless
+# --force-expire, whatever the status (omitted, null, or empty).
 set -euo pipefail
 
 ALL_JSON="${1:-}"
@@ -14,8 +14,8 @@ if [[ -z "$ALL_JSON" || ! -f "$ALL_JSON" ]]; then
   echo "  Merges into existing corpus by fingerprint; input jobs win on conflict." >&2
   echo "  Unseen jobs are closed only when --pagination-complete is set." >&2
   echo "  --pagination-status blocked|captured always refuses expiry (unreadable" >&2
-  echo "  board / user capture). empty with prior open roles also refuses" >&2
-  echo "  expiry unless --force-expire (a filtered URL can look empty)." >&2
+  echo "  board / user capture). Zero incoming rows with prior open roles" >&2
+  echo "  also refuse expiry unless --force-expire, whatever the status." >&2
   echo "  With --expect-count, expiry is skipped when the batch is a strict" >&2
   echo "  subset (matches-only ingest); pass --force-expire to override." >&2
   exit 1
