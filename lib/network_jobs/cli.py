@@ -421,6 +421,8 @@ def cmd_rank(args: argparse.Namespace) -> int:
         "staleHidden": result.get("staleHidden", 0),
         "out": str(dest),
     }
+    if result.get("companyCap"):
+        quiet["companyCap"] = result["companyCap"]
     if args.verbose:
         quiet["shards"] = result.get("shards")
     _dump(quiet, args.verbose)
@@ -479,6 +481,12 @@ def cmd_search(args: argparse.Namespace) -> int:
         json.dumps(result, indent=2, ensure_ascii=False) + "\n"
     )
     print(result["showing"] + " match prefs" + (f" for {args.query!r}" if args.query else ""))
+    # #50: the cap, not the query, is what trimmed the list — say so, otherwise
+    # a one-company corpus reads as "only 3 of 42 match".
+    cap = result.get("companyCap")
+    if isinstance(cap, dict) and cap.get("skipped"):
+        print(f"({cap['skipped']} more held back by the {cap['limit']}-per-company cap"
+              f" — use --company-cap 0 to see them)")
     if result.get("staleHidden"):
         print(f"({result['staleHidden']} stale postings hidden — re-run with --include-stale)")
     today = _date.today()

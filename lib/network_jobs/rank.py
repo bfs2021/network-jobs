@@ -275,16 +275,18 @@ def rank_corpus(
     top: list[dict[str, Any]] = []
     cap = max(0, int(company_cap or 0))
     company_counts: dict[str, int] = {}
+    cap_skipped = 0
     for job in scored:
         if len(top) >= k_eff:
             break
         if cap:
             key = str(job.get("company") or "").strip().lower() or str(job.get("ats") or "")
             if company_counts.get(key, 0) >= cap:
+                cap_skipped += 1
                 continue
             company_counts[key] = company_counts.get(key, 0) + 1
         top.append(job)
-    return {
+    result = {
         "k": k_eff,
         "n": n,
         "showing": f"{len(top)} of {n}",
@@ -293,3 +295,9 @@ def rank_corpus(
         "staleHidden": 0 if include_stale else stale_hidden,
         "jobs": top,
     }
+    # #50: a shortlist that never reaches k because of the diversity cap reads
+    # exactly like "only N match" — say which cap held the rest back. Only
+    # when the cap actually bound; a full shortlist stays quiet.
+    if cap and cap_skipped and len(top) < k_eff:
+        result["companyCap"] = {"limit": cap, "skipped": cap_skipped}
+    return result

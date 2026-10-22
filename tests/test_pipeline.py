@@ -2617,6 +2617,46 @@ class CompanyCapTests(unittest.TestCase):
                              prefs=self.prefs, company_cap=0)
         self.assertEqual(len(result["jobs"]), 5)
 
+    def test_cap_reports_withheld_count(self):
+        # #50: a shortlist that stops at the cap must say the cap did it, not
+        # leave "3 of 5" reading as "only 3 match".
+        result = rank_corpus(data_dir=self.tmp, k=10, today="2026-09-20",
+                             prefs=self.prefs, company_cap=3)
+        self.assertEqual(result["companyCap"], {"limit": 3, "skipped": 2})
+        self.assertEqual(result["showing"], "3 of 5")
+
+    def test_cap_absent_when_shortlist_fills(self):
+        # The cap is not what limited the list, so stay quiet.
+        jobs = json.loads((self.tmp / "corpus" / "jobs-all.json").read_text())
+        for i in range(3):
+            jobs.append({
+                "title": f"Backend Engineer B{i}",
+                "company": "Beta LLC",
+                "department": "Engineering",
+                "location": "Remote",
+                "lastSeen": "2026-09-19",
+                "url": f"https://beta.example/jobs/{i}",
+            })
+        (self.tmp / "corpus" / "jobs-all.json").write_text(json.dumps(jobs) + "\n")
+        result = rank_corpus(data_dir=self.tmp, k=5, today="2026-09-20",
+                             prefs=self.prefs, company_cap=3)
+        self.assertEqual(len(result["jobs"]), 5)
+        self.assertNotIn("companyCap", result)
+
+    def test_search_prints_cap_note(self):
+        from contextlib import redirect_stdout
+        from io import StringIO
+
+        (self.tmp / "preferences.json").write_text(json.dumps(self.prefs) + "\n")
+        out = StringIO()
+        with redirect_stdout(out):
+            rc = helper_main(["search", "--data", str(self.tmp),
+                              "--query", "engineer", "-k", "10"])
+        self.assertEqual(rc, 0)
+        text = out.getvalue()
+        self.assertIn("3 of 5 match prefs", text)
+        self.assertIn("2 more held back by the 3-per-company cap", text)
+
 
 class SalaryParseTests(unittest.TestCase):
     def test_range(self):

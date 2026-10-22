@@ -131,6 +131,10 @@ python3 "$SUITE/skills/network-jobs/helpers/rank-jobs.py" --k 25 --query "$USER_
 
 3. Read `$DATA/search/ranked.json` only. Use `showing` (`K of N`) as the summary line.
    If `staleHidden` > 0, add one line: `(+N stale postings hidden — say "include stale" to see them)`.
+   If `companyCap` is present, add one line before it: `(N more held back by the
+   <limit>-per-company cap — use --company-cap 0 to see them)`. A short `showing`
+   with `companyCap` set means the cap trimmed the list, **not** that only those
+   roles match — say so rather than reporting "only 3 of 42 matched".
 4. Output in **strict format** below. Never paste a full category/shard dump.
 
 Shortcut: `network-jobs search --query "..." -k 25` runs the ranker, writes

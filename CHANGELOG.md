@@ -3,6 +3,14 @@
 ## Unreleased
 
 ### Changed
+- `search` and `rank` say when the **per-company cap** trimmed the shortlist.
+  A one-company corpus printed `3 of 42` for every query — identical output for
+  `product`, `manager`, and nonsense — which reads as "only 3 match" or "the
+  query is ignored", when 39 rows were merely held behind the diversity cap
+  (`--company-cap 0` reveals them). `ranked.json` now carries
+  `companyCap: {limit, skipped}` when the cap actually bound, `search` prints a
+  `(N more held back by the … cap …)` line, and `showing` keeps its documented
+  `K of N` shape. Absent when the shortlist fills normally.
 - `setup`'s `Next:` steps now point at the CLI it just installed. The launcher
   lands in `~/.local/bin`, which is normally not on `PATH` on a first run, so
   `command -v network-jobs` missed it and the steps fell back to `npx --yes
