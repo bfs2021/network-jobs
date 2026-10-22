@@ -4524,6 +4524,55 @@ class InventoryPipelineTests(unittest.TestCase):
         # The human summary block agrees with the header.
         self.assertIn("- **Listings:** 2", inventory)
 
+    def test_manual_card_extract_without_pagination_keeps_header_line(self):
+        """#63 blocker: no pagination.json -> the block omits Pagination.
+
+        The manual card-extract path (`stage-company.sh`, hand-written
+        listings.json, no helper pagination) must keep the header Pagination
+        line, including `status=captured`, and must not be reported as a
+        complete crawl.
+        """
+        tmp = Path(tempfile.mkdtemp(prefix="nj-manual-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        data, triage = self._stage(tmp, name="Beta", slug="beta")
+        (triage / "index" / "listings.json").write_text(json.dumps([
+            {"title": "Senior Backend Engineer",
+             "url": "https://example.com/jobs/1", "location": "Remote",
+             "department": "Engineering"},
+        ]))
+        manual_pagination = (
+            "pages=1, complete=false, truncated=false, "
+            "status=captured (manual card extract)"
+        )
+        inventory = triage / "INVENTORY.md"
+        inventory.write_text(
+            inventory.read_text()
+            .replace("- **Pagination:** (pending)",
+                     f"- **Pagination:** {manual_pagination}")
+            .replace("- **Status:** (pending)", "- **Status:** captured")
+        )
+        self.assertFalse((triage / "index" / "pagination.json").exists())
+
+        rc = helper_main(["match-prefs", "--triage-dir", str(triage),
+                          "--data", str(data), "--company", "Beta"])
+        self.assertEqual(rc, 0)
+        text = inventory.read_text()
+        self.assertEqual(text.count("- **Pagination:**"), 1)
+        self.assertIn(f"- **Pagination:** {manual_pagination}", text)
+        self.assertIn("- **Status:** captured", text)
+        self.assertNotIn("(pending)", text)
+        # Listings lives only in the summary block now.
+        head = text.split(MARKER_START)[0]
+        self.assertNotIn("Listings", head)
+        self.assertEqual(text.count("- **Listings:**"), 1)
+        self.assertIn("- **Listings:** 1", text.split(MARKER_START)[1])
+
+        # A second match-prefs run must not re-add or drop either line.
+        rc = helper_main(["match-prefs", "--triage-dir", str(triage),
+                          "--data", str(data), "--company", "Beta"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(inventory.read_text(), text)
+
     def test_pagination_status_matrix(self):
         import re
 
@@ -4860,6 +4909,29 @@ class InventoryOutputTests(unittest.TestCase):
         # Prose the skeleton added outside the header survives the heal.
         self.assertIn("- **Date:** 2026-10-22", second)
         self.assertIn("- **Next steps:** Review listings.json", second)
+
+    def test_duplicate_header_occurrences_are_all_removed(self):
+        """#63: strip every header copy, not just the first."""
+        tmp = Path(tempfile.mkdtemp(prefix="nj-dupes-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        path = tmp / "INVENTORY.md"
+        path.write_text(
+            "# Careers triage — Example Co\n\n"
+            "- **Listings:** 0\n"
+            "- **Listings:** 1\n"
+            "- **Pagination:** (pending)\n"
+            "- **Pagination:** pages=1, complete=true, truncated=false, status=complete\n"
+            "- **Careers URL:** (fill)\n"
+            "- **Status:** (pending)\n"
+        )
+
+        upsert_inventory(path, self.SUMMARY)
+        text = path.read_text()
+        head = text.split(MARKER_START)[0]
+        self.assertNotIn("Listings", head)
+        self.assertNotIn("Pagination", head)
+        self.assertEqual(text.count("- **Listings:**"), 1)
+        self.assertEqual(text.count("- **Pagination:**"), 1)
 
     def test_unknown_departments_say_so(self):
         self.assertEqual(
