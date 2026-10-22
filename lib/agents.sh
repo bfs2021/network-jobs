@@ -205,6 +205,44 @@ network_jobs_purge_package_cache() {
   ((removed)) || echo "no cached suite copies found"
 }
 
+# Trim leading/trailing whitespace, keeping inner spaces in a path intact.
+network_jobs_trim() {
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s' "$value"
+}
+
+# `suite-root` records the suite the launcher must execute. The launcher treats
+# a recorded-but-missing suite as a broken install (exit 1) rather than silently
+# running the registry build, so a purge — or an already stale record — has to
+# drop the record or it becomes a dead end. Never touch a record that resolves,
+# and never call this after --data removed the whole data dir.
+network_jobs_clear_dangling_suite_root() {
+  local data="${NETWORK_JOBS_HOME:-$HOME/.network-jobs}"
+  local file="$data/suite-root" root
+  [[ -f "$file" ]] || return 0
+  root="$(network_jobs_trim "$(cat "$file" 2>/dev/null || true)")"
+  [[ -z "$root" ]] && return 0
+  [[ -x "$root/bin/network-jobs" ]] && return 0
+  rm -f "$file"
+  printf 'cleared dangling suite-root: %q\n' "$root"
+  return 0
+}
+
+# Explicit re-run command for recovery messages. Never rely on the launcher
+# here: it refuses a dangling suite-root, which is exactly the state a purge
+# leaves behind. Presence is enough — do not exec the runner just to print it.
+network_jobs_setup_rerun_command() {
+  if command -v npx >/dev/null 2>&1; then
+    echo "npx --yes @hirefrank/network-jobs@latest setup --agent auto"
+  elif command -v pnpm >/dev/null 2>&1; then
+    echo "pnpm dlx @hirefrank/network-jobs@latest setup --agent auto"
+  else
+    echo "npm i -g @hirefrank/network-jobs@latest && network-jobs setup --agent auto"
+  fi
+}
+
 # Echo a command prefix that can run a package straight from GitHub.
 network_jobs_package_runner() {
   if command -v pnpm >/dev/null 2>&1 && pnpm --version >/dev/null 2>&1; then

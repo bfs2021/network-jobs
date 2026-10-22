@@ -62,7 +62,9 @@ harness equivalent — instead of a prose list.
    `network-jobs embed-setup` adds semantic resume↔job similarity on top of
    keyword scoring — roles that fit the background without reusing its wording
    still rank — at the cost of fastembed plus a one-time ~60MB model download
-   (needs network once); keyword scoring works without it. Ask **one yes/no
+   (needs network once); keyword scoring works without it. If
+   `network-jobs doctor` already shows an embeddings provider (fastembed or
+   ollama), skip the question — it is configured. Otherwise ask **one yes/no
    question** ("Recommended: yes — it catches fit that keyword overlap misses"),
    then run `network-jobs embed-setup` only if they say yes. If it fails (no
    network, pip restrictions), say so in one line and move on — never block the

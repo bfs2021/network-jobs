@@ -3,6 +3,17 @@
 ## Unreleased
 
 ### Changed
+- The `~/.local/bin/network-jobs` launcher now **fails loudly when
+  `suite-root` records a suite that no longer exists**, instead of silently
+  running the registry build. A dangling cached/npm install and a healthy one
+  printed the same `--version`, so testing a checkout could quietly test
+  `@latest` instead. The message names the dead path and prints runnable
+  recovery commands (`npx --yes @hirefrank/network-jobs@latest setup --agent
+  auto`, or `rm` of the quoted `suite-root`). A missing or whitespace-only
+  `suite-root` still falls back and says so. `reset --purge-cache` now clears a
+  dangling `suite-root` and prints that explicit runner command for re-linking,
+  so its recovery path no longer dead-ends at the launcher; `which` warns (exit
+  0) about a dead recorded suite while the executing copy is fine.
 - `search` and `rank` say when the **per-company cap** trimmed the shortlist.
   A one-company corpus printed `3 of 42` for every query — identical output for
   `product`, `manager`, and nonsense — which reads as "only 3 match" or "the

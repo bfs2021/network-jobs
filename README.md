@@ -24,7 +24,7 @@ network-jobs setup --agent auto
 
 This creates `~/.network-jobs/`, installs `agent-browser` when missing (and upgrades it when it is below the floor declared in `package.json`), puts `network-jobs` on PATH (`~/.local/bin`), and symlinks all six skills into each detected agent’s skills directory.
 
-Search works out of the box with keyword scoring. **Semantic matching** is optional: `network-jobs embed-setup` adds resume↔job similarity on top of keyword scoring for better fit ranking, at the cost of a one-time ~60MB model download (needs network). Setup does not install it; skip it if you're offline or want a lean install.
+Search works out of the box with keyword scoring. **Semantic matching** is optional: `network-jobs embed-setup` adds resume↔job similarity on top of keyword scoring for better fit ranking. It pip-installs fastembed (and dependencies such as onnxruntime) into your Python, downloads a one-time ~60MB model (needs network), and uses a local Ollama instead when one is already running. Setup does not install it; skip it if you're offline or want a lean install.
 
 Zero-install try (no global install):
 
@@ -75,7 +75,7 @@ Daily use is **in the agent**. The CLI also covers install, update, doctor, resu
 - **Model choice (agnostic):** prefer a **stronger** model for career-page discovery; mid-tier is usually enough for local search and intro drafts.
 - **Refresh:** `network-jobs update`
 - **Health:** `network-jobs doctor`
-- **Semantic matching (optional):** `network-jobs embed-setup` installs fastembed (one-time ~60MB model) so `search`/`rank` also score resume↔job similarity. Keyword scoring is unchanged when it's not installed.
+- **Semantic matching (optional):** `network-jobs embed-setup` pip-installs fastembed (one-time ~60MB model, uses a local Ollama if already running) so `search`/`rank` also score resume↔job similarity. Keyword scoring is unchanged when it's not installed.
 - **Data:** everything under `~/.network-jobs/` — no hosted API.
 
 ## Pipeline
