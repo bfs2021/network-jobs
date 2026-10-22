@@ -15,7 +15,7 @@ from urllib.request import Request, urlopen
 
 from .inventory import careers_url_from_listings, crawl_status, upsert_inventory, write_summary_json
 from .dates import normalize_date_iso
-from .fingerprint import fingerprint
+from .fingerprint import fingerprint, plain_id
 from .salary import parse_salary
 from .text import collapse_ws
 
@@ -25,10 +25,15 @@ LIST_KEYS = (
     "nodes", "records",
 )
 TITLE_KEYS = ("title", "jobTitle", "job_title", "name", "text", "role")
+# Canonical posting page first, apply endpoints last: an apply link 302s to an
+# application form, so fetching it never yields a JD (#48). `job_path` is the
+# board-relative canonical page some APIs emit (Amazon search.json) and is
+# absolutized against the crawled URL in normalize_listing, but it never
+# outranks an absolute `jobUrl`/`job_url` (#49).
 URL_KEYS = (
     "url", "absolute_url", "absoluteUrl", "hostedUrl", "hosted_url",
-    "jobUrl", "job_url", "applyUrl", "apply_url", "url_next_step",
-    "urlNextStep", "gh_src", "absolute_url",
+    "jobUrl", "job_url", "job_path", "applyUrl", "apply_url",
+    "url_next_step", "urlNextStep", "gh_src",
 )
 LOC_KEYS = ("location", "jobLocation", "job_location", "workplace", "city")
 # First non-empty candidate wins. Precedence: a key literally named
@@ -43,7 +48,14 @@ DEPT_KEYS = (
     "department", "departments", "departmentName", "department_name",
     "job_category", "jobCategory", "team", "group",
 )
-ID_KEYS = ("externalId", "atsId", "jobId", "job_id", "requisitionId", "requisition_id", "id")
+# A per-posting id wins over a requisition id. Greenhouse reuses one
+# `requisition_id` across several distinct postings (per location/team), so
+# keying identity on it collapses real jobs in the fingerprint dedupe below
+# (#48). `requisition_id` stays as a last resort for boards that emit no other id.
+ID_KEYS = (
+    "externalId", "atsId", "jobId", "job_id", "id",
+    "requisitionId", "requisition_id",
+)
 NEXT_KEYS = ("next", "nextPage", "next_page", "nextUrl", "next_url")
 CURSOR_KEYS = ("nextCursor", "next_cursor", "cursor", "pageId", "page_id", "continuationToken")
 
@@ -96,6 +108,37 @@ def _first(obj: dict[str, Any], keys: tuple[str, ...]) -> Any:
             return obj[key]
         if key.lower() in lower and lower[key.lower()] not in (None, ""):
             return lower[key.lower()]
+    return None
+
+
+def _id_from(raw: dict[str, Any]) -> Any:
+    """First usable ATS id, holding a plain `id` to the fingerprint shape guard.
+
+    `normalize_listing()` writes the result into `externalId`, and `ats_id()`
+    trusts an `externalId` without re-checking it — so the guard has to run
+    here, or a short/slug `id` outranks a good requisition id and collides
+    across companies in a fingerprint that carries no company (#49).
+    """
+    lower = {str(k).lower(): v for k, v in raw.items()}
+
+    def get(key: str) -> Any:
+        if key in raw and raw[key] not in (None, ""):
+            return raw[key]
+        return lower.get(key.lower())
+
+    for key in ID_KEYS:
+        value = get(key)
+        if value is None or value == "":
+            continue
+        if key == "id":
+            text = plain_id(value)
+            if text is None:
+                continue
+            return text
+        text = collapse_ws(str(value))
+        if not text or text.lower().startswith("http"):
+            continue
+        return value
     return None
 
 
@@ -261,7 +304,17 @@ def normalize_listing(raw: Any, source_url: str = "") -> dict[str, Any] | None:
     title = _first(raw, TITLE_KEYS)
     if not title:
         return None
+    # Boards may emit a board-relative canonical page (`job_path`, Amazon);
+    # resolve it against the crawled URL so staged rows always carry an
+    # absolute link (#48). A value without a leading slash would otherwise
+    # resolve under the search path (`/en/en/jobs/…`), so anchor it at the
+    # host root (#49).
     url = _url_from(raw)
+    job_path = raw.get("job_path")
+    if (isinstance(job_path, str) and job_path and url == collapse_ws(job_path)
+            and not url.startswith("/")):
+        url = "/" + url
+    url = _absolute(source_url, url)
     loc_raw = None
     for key in LOC_KEYS:
         if raw.get(key) is not None:
@@ -275,7 +328,7 @@ def normalize_listing(raw: Any, source_url: str = "") -> dict[str, Any] | None:
         dept = dept[0]
     if isinstance(dept, dict):
         dept = _first(dept, ("name", "label", "title"))
-    ext = _first(raw, ID_KEYS)
+    ext = _id_from(raw)
     if isinstance(ext, (int, float)):
         ext = str(int(ext)) if float(ext).is_integer() else str(ext)
     posted = _first(raw, ("postedAt", "posted_at", "updated_at", "updatedAt", "firstPublished", "publishedAt"))

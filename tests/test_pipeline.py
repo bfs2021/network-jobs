@@ -539,6 +539,48 @@ class PaginationTests(unittest.TestCase):
         self.assertTrue(hybrid)
         self.assertIn("Remote", hybrid[0]["locations"])
 
+    def test_distinct_postings_sharing_requisition_id_all_staged(self):
+        # #48: one Greenhouse requisition can cover several distinct postings.
+        # Keying identity on requisition_id silently dropped them at the
+        # fingerprint dedupe while still reporting a `complete` crawl.
+        from network_jobs.pagination import paginate
+        from network_jobs.fingerprint import fingerprint
+
+        payload = {"jobs": [
+            {
+                "id": 5211297008,
+                "requisition_id": "10225",
+                "title": "Staff Infrastructure Engineer, Cluster Infrastructure",
+                "absolute_url": "https://job-boards.greenhouse.io/x/jobs/5211297008",
+                "location": {"name": "London, UK"},
+            },
+            {
+                "id": 5211305008,
+                "requisition_id": "10225",
+                "title": "Staff Software Engineer, Kubernetes Platform",
+                "absolute_url": "https://job-boards.greenhouse.io/x/jobs/5211305008",
+                "location": {"name": "London, UK"},
+            },
+            {
+                "id": 5211498008,
+                "requisition_id": "10225",
+                "title": "Staff Software Engineer, Node Infra",
+                "absolute_url": "https://job-boards.greenhouse.io/x/jobs/5211498008",
+                "location": {"name": "London, UK"},
+            },
+        ]}
+
+        def fake_fetch(url):
+            import json as _json
+            return payload, 200, _json.dumps(payload).encode()
+
+        result = paginate("https://boards-api.greenhouse.io/v1/boards/x/jobs",
+                          fetch=fake_fetch, max_pages=5)
+        self.assertEqual(len(result["listings"]), 3)
+        titles = {j["title"] for j in result["listings"]}
+        self.assertIn("Staff Software Engineer, Kubernetes Platform", titles)
+        self.assertEqual(len({fingerprint(j) for j in result["listings"]}), 3)
+
     def test_repeated_page_stops_and_dedupes(self):
         from network_jobs.pagination import paginate
         from network_jobs.fingerprint import fingerprint
@@ -2845,6 +2887,88 @@ class PaginationNormalizeTests(unittest.TestCase):
         self.assertEqual(job["externalId"], "2829431")
         self.assertEqual(job["department"], "Software Development")
         self.assertNotIn("url_next_step", job)
+
+    def test_amazon_job_path_preferred_over_apply_url(self):
+        # #48: Amazon search.json also emits `job_path` (the canonical page)
+        # alongside `url_next_step` (the apply endpoint, which 302s). Keying on
+        # the apply link made every JD fetch fail, so those rows ingested
+        # title-only. job_path must win, and be absolutized against the crawl.
+        from network_jobs.pagination import normalize_listing
+
+        raw = {
+            "id": "10586855",
+            "title": "Area Manager II",
+            "location": "Salinas, California, USA",
+            "url": None,
+            "url_next_step": "https://account.amazon.jobs/jobs/10586855/apply",
+            "job_path": "/en/jobs/10586855/area-manager-ii-salinas-ca",
+        }
+        job = normalize_listing(raw, "https://www.amazon.jobs/en/search.json?country=USA")
+        assert job is not None
+        self.assertEqual(
+            job["url"], "https://www.amazon.jobs/en/jobs/10586855/area-manager-ii-salinas-ca")
+        self.assertEqual(job["externalId"], "10586855")
+        self.assertNotIn("job_path", job)
+        self.assertNotIn("url_next_step", job)
+
+    def test_requisition_id_does_not_beat_posting_id(self):
+        # #48: Greenhouse reuses one requisition_id across distinct postings.
+        # The per-posting `id` must be the staged externalId so rows don't
+        # collapse in the fingerprint dedupe.
+        from network_jobs.pagination import normalize_listing
+
+        raw = {
+            "id": 5211305008,
+            "requisition_id": "10225",
+            "title": "Staff Software Engineer, Kubernetes Platform",
+            "absolute_url": "https://job-boards.greenhouse.io/anthropic/jobs/5211305008",
+            "location": {"name": "London, UK"},
+        }
+        job = normalize_listing(raw, "https://boards-api.greenhouse.io/v1/boards/anthropic/jobs")
+        assert job is not None
+        self.assertEqual(job["externalId"], "5211305008")
+
+    def test_short_or_slug_id_does_not_beat_requisition_id(self):
+        # #49 review: normalize_listing wrote externalId with no shape check,
+        # and ats_id() trusts externalId — so a junk `id` won and the guard in
+        # plain_id() never ran on the staging path.
+        from network_jobs.pagination import normalize_listing
+
+        base = {
+            "requisition_id": "R-12345",
+            "title": "Staff Software Engineer",
+            "absolute_url": "https://job-boards.greenhouse.io/x/jobs/9",
+            "location": {"name": "London, UK"},
+        }
+        for junk in ("1", "senior-product-manager-nyc", "n/a"):
+            job = normalize_listing({**base, "id": junk},
+                                    "https://boards-api.greenhouse.io/v1/boards/x/jobs")
+            assert job is not None
+            self.assertEqual(job["externalId"], "R-12345", f"junk id {junk!r} won")
+
+    def test_absolute_job_url_beats_job_path(self):
+        # #49 review: job_path must not outrank an absolute jobUrl.
+        from network_jobs.pagination import normalize_listing
+
+        raw = {
+            "title": "Product Manager",
+            "job_path": "/en/jobs/1/pm",
+            "jobUrl": "https://careers.x.com/jobs/1",
+            "location": "Remote",
+        }
+        job = normalize_listing(raw, "https://api.x.com/v1/search.json")
+        assert job is not None
+        self.assertEqual(job["url"], "https://careers.x.com/jobs/1")
+
+    def test_job_path_without_leading_slash_anchors_at_root(self):
+        # #49 review nit: urljoin would nest this under the search path.
+        from network_jobs.pagination import normalize_listing
+
+        raw = {"title": "Product Manager", "job_path": "en/jobs/1/pm",
+               "location": "Remote"}
+        job = normalize_listing(raw, "https://www.amazon.jobs/en/search.json")
+        assert job is not None
+        self.assertEqual(job["url"], "https://www.amazon.jobs/en/jobs/1/pm")
 
     def test_greenhouse_departments_list_mapped(self):
         # Greenhouse nests departments as [{"name": ...}]. "departments" was

@@ -52,17 +52,15 @@ def location_key(job: dict[str, Any]) -> str:
     return collapse_ws(str(job.get("location") or "")).lower()
 
 
-def ats_id(job: dict[str, Any]) -> str | None:
-    for key in ("externalId", "atsId", "jobId", "requisitionId", "gh_jid"):
-        value = job.get(key)
-        if value is None:
-            continue
-        text = collapse_ws(str(value))
-        if text.lower() in PLACEHOLDER_ATS_IDS:
-            continue
-        if text and not text.lower().startswith("http"):
-            return text
-    value = job.get("id")
+def plain_id(value: Any) -> str | None:
+    """A board's plain `id`, accepted only when it looks like a real posting id.
+
+    Applied wherever a raw `id` becomes identity — including
+    `normalize_listing()`, which writes `externalId` that `ats_id()` later
+    trusts outright. A one-character or slug id must not outrank a good
+    requisition id, or short ids collide across companies in a fingerprint
+    that carries no company (#49).
+    """
     if value is None:
         return None
     text = collapse_ws(str(value))
@@ -82,6 +80,34 @@ def ats_id(job: dict[str, Any]) -> str | None:
     if re.fullmatch(r"[A-Za-z0-9_-]{4,64}", text):
         return text
     return None
+
+
+def _declared_id(job: dict[str, Any], keys: tuple[str, ...]) -> str | None:
+    """First non-placeholder, non-URL id under `keys`."""
+    for key in keys:
+        value = job.get(key)
+        if value is None:
+            continue
+        text = collapse_ws(str(value))
+        if text.lower() in PLACEHOLDER_ATS_IDS:
+            continue
+        if text and not text.lower().startswith("http"):
+            return text
+    return None
+
+
+def ats_id(job: dict[str, Any]) -> str | None:
+    text = _declared_id(job, ("externalId", "atsId", "jobId", "gh_jid"))
+    if text:
+        return text
+    # A per-posting `id` beats a requisition id: Greenhouse reuses one
+    # `requisition_id` across several distinct postings (per location/team),
+    # so keying identity on it collapses real jobs (#48). The shape guard
+    # still applies, so a junk `id` falls through (#49).
+    text = plain_id(job.get("id"))
+    if text:
+        return text
+    return _declared_id(job, ("requisitionId", "requisition_id"))
 
 
 def fingerprint(job: dict[str, Any], company: str | None = None) -> str:

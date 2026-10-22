@@ -19,6 +19,27 @@
   installs whose directory is on `PATH` keep the bare `network-jobs`.
 
 ### Fixed
+- Staging silently dropped distinct postings whose board reuses one
+  `requisition_id` (Greenhouse): `requisition_id` outranked the per-posting
+  `id` in both `ID_KEYS` and `fingerprint.ats_id()`, so the fingerprint dedupe
+  in `paginate()` collapsed them while `pagination.json` still reported
+  `complete`. On Anthropic's board that lost 51 of 679 postings — including
+  genuinely different roles sharing one requisition. A plain `id` now wins;
+  `requisition_id` stays as a last resort, and `ats_id()` keeps its shape
+  heuristics so a junk `id` still falls through. Migration: **every** row
+  carrying a `requisition_id` re-keys, not only the ones that collided. On a
+  `complete` crawl the old row is closed in the same batch — bumping
+  `expiredCount`, with no drift warning, because the reconcile keys on
+  `externalId` and the URL is unchanged — while the new row comes back with
+  `firstSeen` reset to today. Nothing shows twice in that case; duplicates
+  persist only across `captured`/`truncated`/`blocked` crawls, where expiry is
+  skipped by design. URLs never feed the fingerprint, so absolutizing them
+  re-keys nothing.
+- Amazon rows staged the **apply** endpoint as their `url`. `search.json`
+  sends `url: null`, `url_next_step` (an apply link that 302s) and `job_path`
+  (the canonical page); `URL_KEYS` lacked `job_path`, so every JD fetch failed
+  and those rows ingested title-only. `job_path` is now preferred over apply
+  aliases and resolved against the crawled URL, so staged links are absolute.
 - `docs/RELEASE.md` verification steps used `npm view
   @hirefrank/network-jobs/latest version`, which npm parses as a **path** and
   fails with `ENOENT` rather than resolving a tarball. Corrected to
