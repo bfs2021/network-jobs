@@ -1,6 +1,17 @@
 # Changelog
 
-## Unreleased
+## v1.8.0 — 2026-10-22
+
+### Added
+- `skills/careers-discover/references/agent-browser.md` documents the verified
+  `agent-browser` commands for the crawl path: `network har` is nested (there is
+  no top-level `har`), `network request <id>` prints the full request and
+  response including the body, and the output path belongs to
+  `har stop <path>`. Written because a stale build's `--version` help makes
+  existing commands look missing.
+- The fetch-log records `agentBrowserVersion` (optional, `method:
+  agent-browser` only), so a run that decided an outcome can be traced back to
+  the browser build that produced it.
 
 ### Fixed
 - `reset` / `uninstall` now print the commands that actually remove the CLI
