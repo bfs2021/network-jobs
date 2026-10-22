@@ -166,7 +166,9 @@ before/after counts.
 
 8. **INVENTORY.md must include**
    - Company name + slug
-   - The header fields **`Listings`**, **`Careers URL`**, **`Pagination`**, **`Status`** — `paginate`, `match-prefs` and `crawl-state` patch them from `index/*.json` on every write, so do not hand-maintain the numbers. If no helper ran (a manual card extract), fill them yourself from the files you wrote.
+   - **`Careers URL`** and **`Status`** in the header, plus free-form fields (`Slug`, `Date`, `Caveats`, `Next steps`). `paginate`, `match-prefs` and `crawl-state` patch those from `index/*.json` on every write, so do not hand-maintain the numbers.
+   - **`Listings`** — and **`Pagination`** when the helper has pagination data — in the `<!-- nj-summary -->` Pipeline summary block. The block is their canonical home, so each label appears exactly once in the file. The skeleton's `Listings`/`Pagination` header lines are pre-helper placeholders and are removed on the first helper write that renders those labels.
+   - If no helper ran (a manual card extract), fill the header fields yourself from the files you wrote. A manual extract without `index/pagination.json` writes `Pagination` in the header — e.g. `pages=1, complete=false, truncated=false, status=captured (manual card extract)` — and `match-prefs` must not delete it (the summary block simply omits `Pagination`).
    - Listing count **and** “N of M match prefs”
    - Department histogram (from the helper)
    - Pagination `{pages, complete, truncated, status}` and crawl hash / skip-if-unchanged
