@@ -58,7 +58,17 @@ harness equivalent — instead of a prose list.
 
    If there is no resume yet, ask for name/email/title as free text, **one question at a time** (these are facts, not choices — free text, not the choice tool).
 
-3. **Preferences interview** (after background is known — **dynamic**)
+3. **Semantic matching** (optional — ask once)
+   `network-jobs embed-setup` adds semantic resume↔job similarity on top of
+   keyword scoring — roles that fit the background without reusing its wording
+   still rank — at the cost of fastembed plus a one-time ~60MB model download
+   (needs network once); keyword scoring works without it. Ask **one yes/no
+   question** ("Recommended: yes — it catches fit that keyword overlap misses"),
+   then run `network-jobs embed-setup` only if they say yes. If it fails (no
+   network, pip restrictions), say so in one line and move on — never block the
+   preferences interview on it.
+
+4. **Preferences interview** (after background is known — **dynamic**)
    Run a short interview **grounded in the resume/profile**. This is not a fixed form.
 
    **How to run it**
@@ -121,7 +131,7 @@ harness equivalent — instead of a prose list.
 
    **STOP** after writing prefs — summarize them, then ask **one question** what to do next: import LinkedIn connections (recommended if the graph is empty), discover roles, or search (recommended if the corpus already has jobs).
 
-4. **LinkedIn export instructions** (if companies graph empty)
+5. **LinkedIn export instructions** (if companies graph empty)
    Guide the user:
 
    1. Open LinkedIn → **Settings & Privacy** → **Data privacy** → **Get a copy of your data**
@@ -131,7 +141,7 @@ harness equivalent — instead of a prose list.
 
    Then hand off to **network-jobs-import**.
 
-5. **Tips** (model-agnostic; paraphrase fine)
+6. **Tips** (model-agnostic; paraphrase fine)
 
    ```text
    Tips

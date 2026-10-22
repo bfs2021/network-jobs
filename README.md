@@ -24,6 +24,8 @@ network-jobs setup --agent auto
 
 This creates `~/.network-jobs/`, installs `agent-browser` when missing (and upgrades it when it is below the floor declared in `package.json`), puts `network-jobs` on PATH (`~/.local/bin`), and symlinks all six skills into each detected agent’s skills directory.
 
+Search works out of the box with keyword scoring. **Semantic matching** is optional: `network-jobs embed-setup` adds resume↔job similarity on top of keyword scoring for better fit ranking, at the cost of a one-time ~60MB model download (needs network). Setup does not install it; skip it if you're offline or want a lean install.
+
 Zero-install try (no global install):
 
 ```bash

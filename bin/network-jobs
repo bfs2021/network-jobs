@@ -933,7 +933,7 @@ cmd_doctor() {
   if [[ -n "$_emb_json" ]]; then
     printf '%s' "$_emb_json" | jq -r '
       (if .provider then "embeddings: \(.provider) (\(.model), \(.dims)d)"
-       else "embeddings: not configured (keyword scoring only)\n  run `network-jobs embed-setup` to enable semantic matching" end),
+       else "embeddings: not configured (keyword scoring only)\n  run `network-jobs embed-setup` for semantic resume↔job matching" end),
       (if .embeddingsFile then "cache: \(.vectorsCached) vectors, model=\(.cacheModel), coverage \((.coverage * 100 | round))% of \(.corpusJobs) corpus jobs"
        else "cache: none (run rebuild or refresh with a provider configured)" end)'
   else
