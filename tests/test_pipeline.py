@@ -4056,6 +4056,275 @@ class SetupNextStepsTests(unittest.TestCase):
                          proc.stdout)
 
 
+class SetupLauncherSuiteRootTests(unittest.TestCase):
+    """#52: a recorded-but-missing suite must fail loudly, not run the registry.
+
+    The launcher collapsed "no suite-root recorded" and "suite-root points at a
+    deleted install" into one branch, so a stale install silently executed
+    `pnpm dlx` / `npx @latest` — same version string, different code. These run
+    the generated launcher by absolute path under a temp HOME, with stub
+    runners, so nothing real is fetched or overwritten.
+    """
+
+    def _setup(self, tmp: Path, home_name: str = "home"):
+        import subprocess
+
+        home = tmp / home_name
+        home.mkdir()
+        fakebin = tmp / "bin"
+        fakebin.mkdir()
+        marker = tmp / "runner-called"
+        for runner in ("pnpm", "npx"):
+            stub = fakebin / runner
+            stub.write_text("#!/usr/bin/env bash\n"
+                            f'printf "%s\\n" "$*" >> "{marker}"\n'
+                            "exit 0\n")
+            stub.chmod(0o755)
+        env = dict(os.environ)
+        env.update({"HOME": str(home),
+                    "NETWORK_JOBS_HOME": str(home / "data"),
+                    "PATH": f"{fakebin}:/usr/bin:/bin"})
+        proc = subprocess.run(
+            ["bash", f"{ROOT}/setup", "--agent", "claude-code", "--no-browser"],
+            capture_output=True, text=True, env=env, timeout=180)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return home, fakebin, marker, proc.stdout
+
+    def _env(self, home: Path, fakebin: Path) -> dict[str, str]:
+        env = dict(os.environ)
+        env.update({"HOME": str(home),
+                    "NETWORK_JOBS_HOME": str(home / "data"),
+                    "PATH": f"{fakebin}:/usr/bin:/bin"})
+        return env
+
+    def _run_launcher(self, home: Path, fakebin: Path, *args: str):
+        import subprocess
+
+        launcher = home / ".local" / "bin" / "network-jobs"
+        self.assertTrue(launcher.exists(), "setup did not write the launcher")
+        return subprocess.run([str(launcher), *args], capture_output=True,
+                              text=True, env=self._env(home, fakebin),
+                              timeout=60)
+
+    @staticmethod
+    def _shell_quote(value: Path | str) -> str:
+        """Exactly what `printf %q` prints, so paste-safety is asserted."""
+        import subprocess
+
+        return subprocess.run(
+            ["bash", "-c", 'printf "%q" "$1"', "_", str(value)],
+            capture_output=True, text=True, check=True).stdout
+
+    def test_dangling_suite_root_fails_instead_of_running_registry_build(self):
+        tmp = Path(tempfile.mkdtemp(prefix="nj-launcher-dangling-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        home, fakebin, marker, _ = self._setup(tmp)
+        dead = tmp / "gone-suite"
+        suite_root = home / "data" / "suite-root"
+        suite_root.write_text(f"{dead}\n")
+
+        proc = self._run_launcher(home, fakebin, "--version")
+
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn(f"installed suite is gone: {self._shell_quote(dead)}",
+                      proc.stderr)
+        # Both recovery instructions must be runnable as printed.
+        self.assertIn("Reinstall: npx --yes @hirefrank/network-jobs@latest "
+                      "setup --agent auto", proc.stderr)
+        self.assertIn(f"Or forget it: rm {self._shell_quote(suite_root)}",
+                      proc.stderr)
+        # No package runner may have been reached.
+        self.assertFalse(marker.exists(), marker.read_text() if marker.exists() else "")
+
+    def test_pnpm_only_machine_gets_a_runnable_recovery_line(self):
+        # A pnpm-only install has no npx; the printed reinstall command must
+        # still be one this machine can run.
+        tmp = Path(tempfile.mkdtemp(prefix="nj-launcher-pnpm-only-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        home, fakebin, marker, _ = self._setup(tmp)
+        (fakebin / "npx").unlink()
+        suite_root = home / "data" / "suite-root"
+        suite_root.write_text(f"{tmp / 'gone-suite'}\n")
+
+        proc = self._run_launcher(home, fakebin, "--version")
+
+        self.assertEqual(proc.returncode, 1, proc.stdout)
+        self.assertIn("Reinstall: pnpm dlx @hirefrank/network-jobs@latest "
+                      "setup --agent auto", proc.stderr)
+        self.assertNotIn("npx --yes", proc.stderr)
+        self.assertFalse(marker.exists())
+
+    def test_space_in_home_quotes_the_recovery_paths(self):
+        tmp = Path(tempfile.mkdtemp(prefix="nj launcher home "))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        home, fakebin, marker, _ = self._setup(tmp, home_name="home dir")
+        dead = tmp / "gone suite"
+        suite_root = home / "data" / "suite-root"
+        suite_root.write_text(f"{dead}\n")
+
+        proc = self._run_launcher(home, fakebin, "--version")
+
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn(self._shell_quote(dead), proc.stderr)
+        self.assertIn(f"rm {self._shell_quote(suite_root)}", proc.stderr)
+        # The quoted rm line is a valid command.
+        import subprocess
+
+        rm_cmd = next(line.split("Or forget it: ", 1)[1]
+                      for line in proc.stderr.splitlines()
+                      if line.startswith("Or forget it: "))
+        done = subprocess.run(["bash", "-c", rm_cmd], capture_output=True,
+                              text=True)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertFalse(suite_root.exists())
+        self.assertFalse(marker.exists())
+
+    def test_whitespace_only_suite_root_falls_back(self):
+        tmp = Path(tempfile.mkdtemp(prefix="nj-launcher-blank-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        home, fakebin, marker, _ = self._setup(tmp)
+        (home / "data" / "suite-root").write_text("  \n\t\n")
+
+        proc = self._run_launcher(home, fakebin, "--version")
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("no suite-root recorded", proc.stderr)
+        self.assertNotIn("installed suite is gone", proc.stderr)
+        self.assertTrue(marker.exists(), proc.stderr)
+
+    def test_absent_suite_root_falls_back_to_the_runner(self):
+        tmp = Path(tempfile.mkdtemp(prefix="nj-launcher-fallback-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        home, fakebin, marker, _ = self._setup(tmp)
+        # setup always records its suite; "absent" is the first-run / cleared case.
+        (home / "data" / "suite-root").unlink()
+
+        proc = self._run_launcher(home, fakebin, "--version")
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertTrue(marker.exists(), proc.stderr)
+        self.assertIn("@hirefrank/network-jobs@latest", marker.read_text())
+        # The fallback is announced, not silent.
+        self.assertIn("no suite-root recorded", proc.stderr)
+        self.assertIn("registry build", proc.stderr)
+
+    def test_which_warns_but_succeeds_when_the_executing_copy_is_fine(self):
+        import subprocess
+
+        tmp = Path(tempfile.mkdtemp(prefix="nj-which-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        data = tmp / "data"
+        data.mkdir()
+        dead = tmp / "gone-suite"
+        suite_root = data / "suite-root"
+        suite_root.write_text(f"{dead}\n")
+        env = dict(os.environ)
+        env.update({"NETWORK_JOBS_HOME": str(data), "HOME": str(tmp / "home")})
+
+        proc = subprocess.run(
+            ["bash", str(ROOT / "bin" / "network-jobs"), "which"],
+            capture_output=True, text=True, env=env, timeout=60)
+
+        # The executing copy is healthy, so this is a warning, not a failure.
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn(f"suite={ROOT}", proc.stdout)
+        self.assertIn("warning: suite-root points at a missing suite", proc.stderr)
+        self.assertIn(self._shell_quote(dead), proc.stderr)
+        self.assertIn(self._shell_quote(suite_root), proc.stderr)
+
+    def test_reset_clears_dangling_suite_root_and_prints_runnable_relink(self):
+        import subprocess
+
+        # A space in HOME is part of the acceptance case.
+        tmp = Path(tempfile.mkdtemp(prefix="nj reset home "))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        home, fakebin, marker, _ = self._setup(tmp, home_name="home dir")
+        data = home / "data"
+        suite_root = data / "suite-root"
+
+        # Fake the npx cache layout the reset purge knows how to remove.
+        cached = (home / ".npm" / "_npx" / "abc123" / "node_modules"
+                  / "@hirefrank" / "network-jobs")
+        shutil.copytree(ROOT, cached,
+                        ignore=shutil.ignore_patterns(".git", "__pycache__"))
+        suite_root.write_text(f"{cached}\n")
+
+        # (a) Simulate npx evicting the cache entry, then run the launcher.
+        shutil.rmtree(cached)
+        proc = self._run_launcher(home, fakebin, "--version")
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn(self._shell_quote(cached), proc.stderr)
+        self.assertIn("Reinstall: npx --yes @hirefrank/network-jobs@latest "
+                      "setup --agent auto", proc.stderr)
+        self.assertFalse(marker.exists())
+
+        # Restore the copy to drive the reset flow itself.
+        shutil.copytree(ROOT, cached,
+                        ignore=shutil.ignore_patterns(".git", "__pycache__"))
+
+        # (b) reset --purge-cache removes that copy. It must clear suite-root
+        # (else the printed next step dies at the launcher) and print an
+        # explicit runner command.
+        reset = subprocess.run(
+            [str(cached / "bin" / "network-jobs"), "reset", "--yes",
+             "--purge-cache", "--agent", "claude-code"],
+            capture_output=True, text=True, env=self._env(home, fakebin),
+            timeout=120)
+        self.assertEqual(reset.returncode, 0, reset.stderr)
+        self.assertFalse(cached.exists(), "purge did not remove the cached copy")
+        self.assertFalse(suite_root.exists(), "suite-root was left dangling")
+        self.assertIn(f"cleared dangling suite-root: {self._shell_quote(cached)}",
+                      reset.stdout)
+        relink = next(line.split("Re-link skills: ", 1)[1]
+                      for line in reset.stdout.splitlines()
+                      if line.startswith("Re-link skills: "))
+        self.assertEqual(relink, "npx --yes @hirefrank/network-jobs@latest "
+                                 "setup --agent auto")
+        # reset prints the command; it must not have run it.
+        self.assertFalse(marker.exists())
+
+        # And the printed command actually runs (stub records the setup args).
+        rerun = subprocess.run(["bash", "-c", relink], capture_output=True,
+                               text=True, env=self._env(home, fakebin),
+                               timeout=60)
+        self.assertEqual(rerun.returncode, 0, rerun.stderr)
+        self.assertIn("setup --agent auto", marker.read_text())
+
+    def test_reset_keeps_a_suite_root_that_still_resolves(self):
+        import subprocess
+
+        tmp = Path(tempfile.mkdtemp(prefix="nj-reset-valid-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        home, fakebin, marker, _ = self._setup(tmp)
+        suite_root = home / "data" / "suite-root"
+        suite_root.write_text(f"{ROOT}\n")
+
+        proc = subprocess.run(
+            [str(ROOT / "bin" / "network-jobs"), "reset", "--yes",
+             "--purge-cache", "--agent", "claude-code"],
+            capture_output=True, text=True, env=self._env(home, fakebin),
+            timeout=120)
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertTrue(suite_root.exists(), proc.stdout)
+        self.assertEqual(suite_root.read_text().strip(), str(ROOT))
+        self.assertNotIn("cleared dangling suite-root", proc.stdout)
+
+    def test_setup_offers_embeddings_with_value_and_cost(self):
+        tmp = Path(tempfile.mkdtemp(prefix="nj-setup-embed-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        _, _, _, stdout = self._setup(tmp)
+
+        self.assertIn("Optional:", stdout)
+        self.assertIn("embed-setup", stdout)
+        self.assertIn("Semantic resume<->job matching", stdout)
+        self.assertIn("60MB", stdout)
+        self.assertIn("pip-installs fastembed", stdout)
+        self.assertIn("onnxruntime", stdout)
+        self.assertIn("Ollama", stdout)
+        self.assertIn("Keyword scoring works without it", stdout)
+
+
 class InventoryPipelineTests(unittest.TestCase):
     """#33: the INVENTORY header is owned by the helpers, not by the model."""
 

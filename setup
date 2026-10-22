@@ -281,17 +281,37 @@ if [[ "$INSTALL_LAUNCHER" -eq 1 ]]; then
     cat > "$launcher_dir/network-jobs" <<'LAUNCHER'
 #!/usr/bin/env bash
 # network-jobs launcher — resolves the installed suite, falls back to a
-# fresh fetch from GitHub if that copy was garbage collected.
+# fresh fetch from GitHub only when no suite has been recorded yet.
 set -euo pipefail
 data="${NETWORK_JOBS_HOME:-$HOME/.network-jobs}"
 root="$(cat "$data/suite-root" 2>/dev/null || true)"
-if [[ -n "$root" && -x "$root/bin/network-jobs" ]]; then
-  exec "$root/bin/network-jobs" "$@"
+# Trim surrounding whitespace: a blank suite-root is "no install recorded", not
+# a recorded install whose path is the empty string.
+root="${root#"${root%%[![:space:]]*}"}"
+root="${root%"${root##*[![:space:]]}"}"
+# Two different states, two different answers. A recorded suite that is gone is
+# a broken install, not a first run: substituting the registry build would run
+# different code than the user installed, with the same --version output.
+if [[ -n "$root" ]]; then
+  if [[ -x "$root/bin/network-jobs" ]]; then
+    exec "$root/bin/network-jobs" "$@"
+  fi
+  printf 'network-jobs: installed suite is gone: %q\n' "$root" >&2
+  # pnpm-only installs have no npx; print a runner this machine actually has.
+  if command -v npx >/dev/null 2>&1; then
+    echo "Reinstall: npx --yes @hirefrank/network-jobs@latest setup --agent auto" >&2
+  else
+    echo "Reinstall: pnpm dlx @hirefrank/network-jobs@latest setup --agent auto" >&2
+  fi
+  printf 'Or forget it: rm %q\n' "$data/suite-root" >&2
+  exit 1
 fi
 if command -v pnpm >/dev/null 2>&1 && pnpm --version >/dev/null 2>&1; then
+  echo "network-jobs: no suite-root recorded — running registry build (@hirefrank/network-jobs@latest) via pnpm dlx" >&2
   exec pnpm dlx '@hirefrank/network-jobs@latest' "$@"
 fi
 if command -v npx >/dev/null 2>&1 && npx --version >/dev/null 2>&1; then
+  echo "network-jobs: no suite-root recorded — running registry build (@hirefrank/network-jobs@latest) via npx" >&2
   exec npx --yes '@hirefrank/network-jobs@latest' "$@"
 fi
 echo "network-jobs: suite not found and no pnpm/npx available" >&2
@@ -494,6 +514,14 @@ if [[ "$has_companies" -eq 0 ]]; then
   echo "  $((step++)). $cli_invocation import ~/Downloads/Connections.zip"
 fi
 echo "  $((step++)). In your agent: \"find open roles at companies I know\" (review triage before ingest)"
+
+# Say what embeddings buy, what they cost, and that setup did not install them.
+# Non-interactive on purpose: setup is scripted, so this is an offer, not a prompt.
+echo
+echo "Optional:"
+echo "  Semantic resume<->job matching (better fit ranking): $cli_invocation embed-setup"
+echo "  Keyword scoring works without it. One time: pip-installs fastembed (+onnxruntime deps)"
+echo "  into your Python and downloads a ~60MB model (needs network); uses local Ollama if running."
 
 if [[ "$PRINT_ROUTING" -eq 1 && -f "$SUITE_ROOT/docs/AGENTS.md.snippet" ]]; then
   echo

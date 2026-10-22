@@ -1173,7 +1173,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         print(f"embeddings: {provider.name} ({provider.model}, {provider.dims}d)")
     else:
         print("embeddings: not configured (keyword scoring only)")
-        print("  run `network-jobs embed-setup` to enable semantic matching")
+        print("  run `network-jobs embed-setup` for semantic resume↔job matching")
     if cache:
         print(
             f"cache: {len(vectors)} vectors, model={cache.get('model')}, "

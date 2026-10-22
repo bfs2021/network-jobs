@@ -694,12 +694,19 @@ cmd_reset() {
     network_jobs_purge_package_cache
   fi
 
+  # A purge removes the copy suite-root points at, and the launcher refuses a
+  # recorded-but-missing suite. Clear the dead record (only when the data dir
+  # survived) so the printed re-link step is not a dead end.
+  if [[ "$wipe_data" -eq 0 ]]; then
+    network_jobs_clear_dangling_suite_root
+  fi
+
   echo
   echo "Reset complete ($removed removed)."
   if [[ "$wipe_data" -eq 1 ]]; then
     echo "Reinstall: npm i -g @hirefrank/network-jobs@latest && network-jobs setup --agent auto"
   else
-    echo "Re-link skills: network-jobs setup --agent auto"
+    echo "Re-link skills: $(network_jobs_setup_rerun_command)"
   fi
   if [[ "$wipe_data" -eq 1 ]]; then
     print_cli_removal_hint "$purge_cache"
@@ -783,6 +790,9 @@ cmd_update() {
     fi
     echo "Updating from GitHub (purging cached suite first)…"
     network_jobs_purge_package_cache
+    # Same dead end as reset: the launcher refuses a suite-root whose copy the
+    # purge just removed. Clear it so a failed re-fetch can still fall back.
+    network_jobs_clear_dangling_suite_root
     local runner
     if ! runner="$(network_jobs_package_runner)"; then
       echo "error: neither pnpm nor npx is usable — cannot re-fetch the suite" >&2
@@ -933,7 +943,7 @@ cmd_doctor() {
   if [[ -n "$_emb_json" ]]; then
     printf '%s' "$_emb_json" | jq -r '
       (if .provider then "embeddings: \(.provider) (\(.model), \(.dims)d)"
-       else "embeddings: not configured (keyword scoring only)\n  run `network-jobs embed-setup` to enable semantic matching" end),
+       else "embeddings: not configured (keyword scoring only)\n  run `network-jobs embed-setup` for semantic resume↔job matching" end),
       (if .embeddingsFile then "cache: \(.vectorsCached) vectors, model=\(.cacheModel), coverage \((.coverage * 100 | round))% of \(.corpusJobs) corpus jobs"
        else "cache: none (run rebuild or refresh with a provider configured)" end)'
   else
@@ -1443,6 +1453,29 @@ cmd_which() {
   fi
   echo "suite=$ROOT"
   echo "data=$DATA_HOME"
+
+  # Never report a suite that cannot run. The launcher refuses a recorded-but-
+  # missing suite, and `which` must agree rather than print a dead path as if
+  # it were the code about to execute.
+  if [[ ! -x "$ROOT/bin/network-jobs" ]]; then
+    echo "error: this copy cannot run: $ROOT/bin/network-jobs is missing" >&2
+    return 1
+  fi
+  local recorded=""
+  if [[ -f "$DATA_HOME/suite-root" ]]; then
+    recorded="$(network_jobs_trim "$(cat "$DATA_HOME/suite-root" 2>/dev/null || true)")"
+  fi
+  if [[ -n "$recorded" && "$recorded" != "$ROOT" ]]; then
+    if [[ -x "$recorded/bin/network-jobs" ]]; then
+      echo "recorded=$recorded (setup's suite-root, not this copy)"
+    else
+      # This copy runs fine, so a stale record elsewhere is a warning, not a
+      # failure — but say so, with a runnable way out.
+      printf 'warning: suite-root points at a missing suite: %q\n' "$recorded" >&2
+      printf '  run: network-jobs reset --yes --purge-cache (or rm %q)\n' \
+        "$DATA_HOME/suite-root" >&2
+    fi
+  fi
 }
 
 # Day-to-day commands delegate to the Python lib CLI (network_jobs.cli).
