@@ -4054,6 +4054,24 @@ class SetupLauncherSuiteRootTests(unittest.TestCase):
         # No package runner may have been reached.
         self.assertFalse(marker.exists(), marker.read_text() if marker.exists() else "")
 
+    def test_pnpm_only_machine_gets_a_runnable_recovery_line(self):
+        # A pnpm-only install has no npx; the printed reinstall command must
+        # still be one this machine can run.
+        tmp = Path(tempfile.mkdtemp(prefix="nj-launcher-pnpm-only-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        home, fakebin, marker, _ = self._setup(tmp)
+        (fakebin / "npx").unlink()
+        suite_root = home / "data" / "suite-root"
+        suite_root.write_text(f"{tmp / 'gone-suite'}\n")
+
+        proc = self._run_launcher(home, fakebin, "--version")
+
+        self.assertEqual(proc.returncode, 1, proc.stdout)
+        self.assertIn("Reinstall: pnpm dlx @hirefrank/network-jobs@latest "
+                      "setup --agent auto", proc.stderr)
+        self.assertNotIn("npx --yes", proc.stderr)
+        self.assertFalse(marker.exists())
+
     def test_space_in_home_quotes_the_recovery_paths(self):
         tmp = Path(tempfile.mkdtemp(prefix="nj launcher home "))
         self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))

@@ -297,7 +297,12 @@ if [[ -n "$root" ]]; then
     exec "$root/bin/network-jobs" "$@"
   fi
   printf 'network-jobs: installed suite is gone: %q\n' "$root" >&2
-  echo "Reinstall: npx --yes @hirefrank/network-jobs@latest setup --agent auto" >&2
+  # pnpm-only installs have no npx; print a runner this machine actually has.
+  if command -v npx >/dev/null 2>&1; then
+    echo "Reinstall: npx --yes @hirefrank/network-jobs@latest setup --agent auto" >&2
+  else
+    echo "Reinstall: pnpm dlx @hirefrank/network-jobs@latest setup --agent auto" >&2
+  fi
   printf 'Or forget it: rm %q\n' "$data/suite-root" >&2
   exit 1
 fi
