@@ -45,7 +45,20 @@ TITLE_CATEGORY_PATTERNS: list[tuple[str, str]] = [
     (r"\b(machine learning|ml engineer|ml ops|mlops|deep learning|artificial intelligence|\bai[ -]?ml\b|llm |research scientist)\b", "ai-ml"),
     (r"\b(data scientist|data engineer|analytics engineer|bi engineer|business intelligence|data analyst|analytics)\b", "data"),
     (r"\b(product design(?:er)?|ux designer|ui designer|brand designer|graphic designer|design system|user experience|user interface)\b", "design"),
-    (r"\b(product manager|\bpm\b|group pm|staff pm|principal pm|product lead|product owner|technical product manager|\btpm\b|program manager)\b", "product"),
+    # A program manager delivers another team's program, so the domain word
+    # decides the category, not the "manager" suffix: a compliance, legal,
+    # regulatory or privacy program manager is legal (#57 — it used to claim
+    # product's confirmed +5 and outrank actual PMs on a "product manager"
+    # search). Only product and technical programs are product roles below.
+    (r"\b(compliance|legal|regulatory|privacy)\s+(?:program|project)\s+managers?\b", "legal"),
+    (r"\b(security|infosec)\s+(?:program|project)\s+managers?\b", "it-security"),
+    (r"\b(people|talent|hr)\s+(?:program|project)\s+managers?\b", "people"),
+    (r"\boperations\s+(?:program|project)\s+managers?\b", "operations"),
+    # `technical program manager` is listed explicitly: it used to match only
+    # through the generic `program manager` phrase removed in #57. A bare
+    # "Program Manager" now carries no domain and falls through to
+    # `other`/low, so a weak guess never earns a category bonus (#40).
+    (r"\b(product manager|group pm|staff pm|principal pm|product lead|product owner|technical product manager|technical program manager|\btpm\b|\bpm\b)\b", "product"),
     (r"\b(account executive|\bae\b|\bsdr\b|\bbdr\b|sales engineer|solutions engineer|business development|account director|sales manager)\b", "sales"),
     (r"\b(product marketing|demand gen|growth marketing|content marketer|communications|copywriter|\bpmm\b|\bpr\b)\b", "marketing"),
     (r"\b(customer success|customer support|solutions architect|implementation manager|account manager|support engineer|cx manager)\b", "customer-success"),
