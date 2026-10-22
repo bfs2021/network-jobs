@@ -13,7 +13,7 @@ from typing import Any
 from .classify import classify_listings
 from .fingerprint import fingerprint
 from .corpus import rebuild
-from .inventory import upsert_inventory, write_summary_json
+from .inventory import careers_url_from_listings, upsert_inventory, write_summary_json
 from .matches import MatchesFormatError, load_matches, normalize_matches, write_matches
 from .pagination import DEFAULT_MAX_LISTINGS, DEFAULT_MAX_PAGES, paginate, write_pagination
 from .paths import data_home
@@ -103,6 +103,14 @@ def _do_match_prefs(
     existing = _load_json(out_dir / "summary.json", {})
     if isinstance(existing, dict):
         summary = {**existing, **summary}
+    if not isinstance(summary.get("pagination"), dict):
+        pagination = _load_json(out_dir / "pagination.json", {})
+        if isinstance(pagination, dict) and pagination:
+            summary["pagination"] = pagination
+    if not summary.get("careersUrl"):
+        careers_url = careers_url_from_listings(listings)
+        if careers_url:
+            summary["careersUrl"] = careers_url
     write_summary_json(out_dir, summary)
     upsert_inventory(triage_dir / "INVENTORY.md", summary)
     return result
@@ -382,6 +390,12 @@ def cmd_fetch_descriptions(args: argparse.Namespace) -> int:
         timeout=args.timeout,
         max_chars=args.max_chars,
     )
+    company = getattr(args, "company", "") or ""
+    if company:
+        # Optional, mirrors match-prefs/review-matches so the skill can pass
+        # one --company through the whole pipeline (#33). It only labels the
+        # run; the source file is still chosen by --all / matches default.
+        result = {"company": company, **result}
     _dump(result, args.verbose)
     return 0
 
@@ -1153,6 +1167,8 @@ def build_parser() -> argparse.ArgumentParser:
     fd.add_argument("--triage-dir", required=True)
     fd.add_argument("--all", action="store_true",
                     help="fetch for listings.json instead of matches.json")
+    fd.add_argument("--company", default="",
+                    help="company label for the run / summary output (optional)")
     fd.add_argument("--timeout", type=int, default=30)
     fd.add_argument("--max-chars", type=int, default=10000)
     fd.set_defaults(func=cmd_fetch_descriptions)

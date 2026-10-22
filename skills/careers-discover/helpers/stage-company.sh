@@ -85,6 +85,8 @@ if [[ ! -f "$DIR/INVENTORY.md" ]]; then
 - **Date:** ${DATE}
 - **Careers URL:** (fill)
 - **Listings:** 0
+- **Pagination:** (pending)
+- **Status:** (pending)
 - **Caveats:**
 - **Next steps:** Review listings.json, then run jobs-ingest if OK.
 EOF

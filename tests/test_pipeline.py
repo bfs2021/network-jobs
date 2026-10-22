@@ -3397,5 +3397,224 @@ class AgentBrowserVersionFloorTests(unittest.TestCase):
         self.assertIn("network-jobs update", proc.stdout)
 
 
+class InventoryPipelineTests(unittest.TestCase):
+    """#33: the INVENTORY header is owned by the helpers, not by the model."""
+
+    @staticmethod
+    def _header(text: str) -> dict[str, str]:
+        import re
+
+        head = text.split(MARKER_START)[0]
+        return {
+            label.strip(): value.strip()
+            for label, value in re.findall(r"^- \*\*([^*]+):\*\* (.*)$", head, re.M)
+        }
+
+    def _stage(self, tmp: Path, name: str = "Example Co", slug: str = "example-co"):
+        import subprocess
+
+        data = tmp / "data"
+        (data / "resume").mkdir(parents=True, exist_ok=True)
+        shutil.copy(FIXTURES / "preferences.json", data / "preferences.json")
+        shutil.copy(FIXTURES / "resume-keywords.md", data / "resume" / "text.md")
+        env = {**os.environ, "NETWORK_JOBS_HOME": str(data)}
+        proc = subprocess.run(
+            ["bash", str(ROOT / "skills" / "careers-discover" / "helpers" / "stage-company.sh"),
+             name, slug],
+            capture_output=True, text=True, env=env, timeout=60,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        triage = Path(proc.stdout.strip().splitlines()[-1])
+        self.assertTrue((triage / "INVENTORY.md").is_file())
+        return data, triage
+
+    def test_header_agrees_with_index_after_paginate_and_match_prefs(self):
+        tmp = Path(tempfile.mkdtemp(prefix="nj-inv-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        data, triage = self._stage(tmp)
+        capture = tmp / "capture.json"
+        capture.write_text(json.dumps([
+            {"title": "Senior Product Manager, Foundations",
+             "url": "https://example.com/jobs/1", "location": "Remote",
+             "sourceUrl": "https://example.com/careers"},
+            {"title": "Senior Backend Engineer",
+             "url": "https://example.com/jobs/2", "location": "Remote",
+             "sourceUrl": "https://example.com/careers"},
+        ]))
+        rc = helper_main(["paginate", "--triage-dir", str(triage),
+                          "--input", str(capture), "--company", "Example Co"])
+        self.assertEqual(rc, 0)
+        rc = helper_main(["match-prefs", "--triage-dir", str(triage),
+                          "--data", str(data), "--company", "Example Co"])
+        self.assertEqual(rc, 0)
+
+        listings = json.loads((triage / "index" / "listings.json").read_text())
+        pagination = json.loads((triage / "index" / "pagination.json").read_text())
+        inventory = (triage / "INVENTORY.md").read_text()
+        header = self._header(inventory)
+
+        self.assertEqual(int(header["Listings"]), len(listings))
+        self.assertEqual(header["Listings"], "2")
+        # Careers URL comes from the rows' sourceUrl, never a placeholder.
+        self.assertEqual(header["Careers URL"], "https://example.com/careers")
+        self.assertNotIn("(fill)", header["Careers URL"])
+        self.assertIn("Status", header)
+        self.assertEqual(header["Status"], pagination["status"])
+        self.assertEqual(header["Status"], "complete")
+        self.assertIn(f"complete={str(pagination['complete']).lower()}",
+                      header["Pagination"])
+        # The human summary block agrees with the header.
+        self.assertIn("- **Listings:** 2", inventory)
+
+    def test_pagination_status_complete_truncated_blocked(self):
+        import re
+
+        from network_jobs.pagination import paginate, write_pagination
+
+        triple = Path(tempfile.mkdtemp(prefix="nj-status-"))
+        self.addCleanup(lambda: shutil.rmtree(triple, ignore_errors=True))
+
+        def triage_for(label: str) -> Path:
+            triage = triple / label
+            (triage / "index").mkdir(parents=True)
+            (triage / "INVENTORY.md").write_text(
+                f"# Careers triage — {label}\n\n- **Listings:** 0\n"
+                "- **Careers URL:** (fill)\n- **Pagination:** (pending)\n"
+                "- **Status:** (pending)\n"
+            )
+            return triage
+
+        def status_of(triage: Path) -> str:
+            pag = json.loads((triage / "index" / "pagination.json").read_text())
+            inv = (triage / "INVENTORY.md").read_text()
+            header = self._header(inv)
+            self.assertEqual(pag["status"], header["Status"])
+            self.assertEqual(int(header["Listings"]),
+                             len(json.loads((triage / "index" / "listings.json").read_text())))
+            self.assertTrue(re.match(r"^pages=\d+, complete=(true|false), ",
+                                     header["Pagination"]))
+            return pag["status"]
+
+        # complete: clean crawl.
+        clean = triage_for("clean")
+        result = paginate(None, payload=[
+            {"title": "Engineer", "url": "https://example.com/jobs/1",
+             "location": "Remote", "sourceUrl": "https://example.com/careers"},
+        ])
+        self.assertEqual(result["pagination"]["status"], "complete")
+        write_pagination(clean, result, company="Clean")
+        self.assertEqual(status_of(clean), "complete")
+
+        # truncated: page cap hit with rows captured.
+        capped = triage_for("capped")
+        jobs = [{"title": f"Engineer {i}", "url": f"https://example.com/jobs/{i}",
+                 "location": "Remote"} for i in range(60)]
+        payload = {"jobs": jobs}
+
+        def fake_fetch(url):
+            return payload, 200, json.dumps(payload).encode()
+
+        result = paginate("https://example.com/api/jobs", fetch=fake_fetch,
+                          max_pages=1, page_size=50)
+        self.assertTrue(result["pagination"]["truncated"])
+        self.assertEqual(result["pagination"]["status"], "truncated")
+        write_pagination(capped, result, company="Capped")
+        self.assertEqual(status_of(capped), "truncated")
+
+        # blocked: zero listings captured is a readability failure, not a
+        # company with no openings.
+        blocked = triage_for("blocked")
+        result = paginate(None, payload=[])
+        self.assertEqual(result["listings"], [])
+        self.assertEqual(result["pagination"]["status"], "blocked")
+        write_pagination(blocked, result, company="Blocked")
+        self.assertEqual(status_of(blocked), "blocked")
+        self.assertEqual(self._header((blocked / "INVENTORY.md").read_text())["Status"],
+                         "blocked")
+
+    def test_fetch_descriptions_accepts_company_flag(self):
+        import io
+        from contextlib import redirect_stdout
+
+        tmp = Path(tempfile.mkdtemp(prefix="nj-fd-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        triage = tmp / "triage"
+        (triage / "index").mkdir(parents=True)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = helper_main(["fetch-descriptions", "--triage-dir", str(triage),
+                              "--company", "Example Co", "--timeout", "1"])
+        self.assertEqual(rc, 0)
+        payload = json.loads(out.getvalue())
+        self.assertEqual(payload["company"], "Example Co")
+        self.assertEqual(payload["fetched"], 0)  # no matches.json, no network
+
+
+class SkillDocConsistencyTests(unittest.TestCase):
+    """#33/#34: the skill must not document flags that helpers reject."""
+
+    SKILL = ROOT / "skills" / "careers-discover" / "SKILL.md"
+
+    # Flags each helper accepts *after* its own script name (the root parser's
+    # -v is documented nowhere and would have to precede the subcommand).
+    HELPER_FLAGS = {
+        "paginate-listings.py": {"--url", "--input", "--triage-dir", "--company",
+                                 "--max-pages", "--max-listings"},
+        "crawl-state.py": {"--triage-dir", "--listings", "--companies", "--data",
+                           "--company", "--slug", "--stamp", "--source-url"},
+        "match-prefs.py": {"--triage-dir", "--listings", "--prefs", "--resume",
+                           "--data", "--company"},
+        "fetch-descriptions.py": {"--triage-dir", "--all", "--company", "--timeout",
+                                  "--max-chars"},
+        "review-matches.py": {"--triage-dir", "--listings", "--prefs", "--resume",
+                              "--data", "--company", "--min-cluster", "--veto",
+                              "--json"},
+    }
+
+    def _text(self) -> str:
+        return self.SKILL.read_text()
+
+    def _invocations(self, helper: str) -> list[str]:
+        lines = self._text().splitlines()
+        blocks: list[str] = []
+        for i, line in enumerate(lines):
+            if helper not in line:
+                continue
+            block = [line]
+            j = i
+            while block[-1].rstrip().endswith("\\") and j + 1 < len(lines):
+                j += 1
+                block.append(lines[j])
+            blocks.append("\n".join(block))
+        return blocks
+
+    def test_exactly_one_7b_section(self):
+        import re
+
+        self.assertEqual(len(re.findall(r"^7b\.", self._text(), re.M)), 1)
+
+    def test_documented_helper_flags_are_accepted(self):
+        import re
+
+        for helper, allowed in self.HELPER_FLAGS.items():
+            with self.subTest(helper=helper):
+                invocations = self._invocations(helper)
+                self.assertTrue(invocations, f"{helper} is never invoked in SKILL.md")
+                for block in invocations:
+                    used = set(re.findall(r"--[A-Za-z0-9-]+", block))
+                    self.assertFalse(used - allowed,
+                                     f"{helper}: doc uses {sorted(used - allowed)}")
+
+    def test_skill_documents_budget_and_user_capture(self):
+        text = self._text()
+        self.assertIn("2 endpoint", text)
+        self.assertIn("5 browser interactions", text)
+        self.assertIn("user-capture", text)
+        self.assertIn("captures/", text)
+        self.assertIn("--input", text)
+        self.assertIn("status: blocked", text)
+        self.assertIn("Never invent", text)
+
+
 if __name__ == "__main__":
     unittest.main()

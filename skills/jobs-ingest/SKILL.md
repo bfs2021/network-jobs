@@ -63,7 +63,7 @@ python3 "$SUITE/skills/jobs-ingest/helpers/classify-listings.py" \
    Fill `companyDomain` from the graph when known. Keep `salary` / `postedAt` only if present in triage.
 5. **Merge** into corpus via helper (required):
    - Write the **new/updated jobs only** to a working file (e.g. `$DATA/corpus/.work/batch.json`)
-   - Read `index/pagination.json` (or INVENTORY). Pass `--pagination-complete` **only** when `complete` is true.
+   - Read `index/pagination.json` (or INVENTORY). Pass `--pagination-complete` **only** when `complete` is true **and** `status` is not `blocked` — a blocked board captured zero rows because it could not be read, not because the roles closed. `status: truncated` behaves like `complete: false` for expiry.
    - Always pass `--expect-count` with the full board size (`index/listings.json` length). A matches-only batch over a bigger board then **skips expiry loudly** instead of closing live roles; only `--force-expire` overrides (use when you know the board genuinely shrank).
    - Run [`helpers/rebuild-corpus.sh`](helpers/rebuild-corpus.sh) on that file:
 

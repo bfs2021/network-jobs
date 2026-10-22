@@ -13,7 +13,7 @@ from typing import Any
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
-from .inventory import upsert_inventory, write_summary_json
+from .inventory import careers_url_from_listings, crawl_status, upsert_inventory, write_summary_json
 from .dates import normalize_date_iso
 from .fingerprint import fingerprint
 from .salary import parse_salary
@@ -516,12 +516,16 @@ def paginate(
 
     return {
         "listings": listings,
+        "sourceUrl": source_url,
         "pagination": {
             "pages": pages,
             "complete": complete and not truncated,
             "truncated": truncated,
             "scheme": scheme,
             "maxPages": max_pages,
+            # Additive, machine-readable crawl state (#34): a blocked board
+            # captured no listings — it is not a board with no openings.
+            "status": "blocked" if not listings else ("truncated" if truncated else "complete"),
         },
         "fetchLog": fetch_log,
     }
@@ -535,6 +539,9 @@ def write_pagination(triage_dir: Path, result: dict[str, Any], company: str = ""
         json.dumps(result["listings"], indent=2, ensure_ascii=False) + "\n"
     )
     pag = dict(result["pagination"])
+    pag.setdefault(
+        "status", crawl_status(pag, len(result["listings"]))
+    )
     (index / "pagination.json").write_text(json.dumps(pag, indent=2) + "\n")
     log_dir = triage / "fetch-log"
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -546,6 +553,11 @@ def write_pagination(triage_dir: Path, result: dict[str, Any], company: str = ""
         "nListings": len(result["listings"]),
         "pagination": pag,
     }
+    careers_url = careers_url_from_listings(
+        result["listings"], str(result.get("sourceUrl") or "")
+    )
+    if careers_url:
+        summary["careersUrl"] = careers_url
     existing = {}
     summary_path = index / "summary.json"
     if summary_path.is_file():

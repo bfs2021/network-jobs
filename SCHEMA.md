@@ -24,10 +24,11 @@ Default: `~/.network-jobs/` (override with `NETWORK_JOBS_HOME`).
 ├── triage/
 │   └── careers-<slug>-<YYYY-MM-DD>/
 │       ├── INVENTORY.md
+│       ├── captures/                  # user-saved JSON/HTML for a gated board
 │       ├── index/
 │       │   ├── listings.json
 │       │   ├── matches.json          # prefs-scored shortlist
-│       │   ├── pagination.json       # pages / complete / truncated
+│       │   ├── pagination.json       # pages / complete / truncated / status
 │       │   └── summary.json
 │       └── fetch-log/
 │           └── <timestamp>-<label>.json
@@ -212,11 +213,12 @@ Written by `careers-discover/helpers/paginate-listings.py` when a jobs JSON/API 
   "complete": true,
   "truncated": false,
   "scheme": "link",
-  "maxPages": 15
+  "maxPages": 15,
+  "status": "complete"
 }
 ```
 
-Also copied into the INVENTORY `Pagination:` line. **`complete` is false** when the cap truncated the crawl or a next-page signal remained. Ingest must **not** expire unseen jobs unless `complete` is true.
+`status` is `complete` (clean crawl), `truncated` (page/listing cap hit) or `blocked` (zero listings captured — the board could not be read, **not** “no openings”). It is additive: `complete` / `truncated` keep their existing meaning and remain the rule for expiry. Also copied into the INVENTORY `Pagination:` line and surfaced as the header `Status:` field. **`complete` is false** when the cap truncated the crawl or a next-page signal remained. Ingest must **not** expire unseen jobs unless `complete` is true.
 
 ### index/matches.json
 
@@ -258,7 +260,9 @@ normalizes it to this object.
 
 Required. Summarize: company, careers URL used, listing count, caveats, suggested next steps.
 
-Helpers append a `<!-- nj-summary -->` block with **N of M match prefs**, a department histogram, and (later) pagination. Do not dump the full board into chat — point at `matches.json`.
+The top header block carries machine-readable fields — `Slug`, `Date`, `Careers URL`, `Listings`, `Pagination`, `Status`. `stage-company.sh` writes placeholders; `paginate`, `match-prefs` and `crawl-state` replace them from `index/*.json` on every write (`lib/network_jobs/inventory.py`), so the header always agrees with the data files. `Careers URL` comes from the rows' `sourceUrl` (the crawled endpoint) when available.
+
+Helpers also append a `<!-- nj-summary -->` block with **N of M match prefs**, a department histogram, and pagination. Do not dump the full board into chat — point at `matches.json`.
 
 ### fetch-log/
 
@@ -274,6 +278,8 @@ Verbatim capture of each fetch/browser snapshot **before** presenting results to
   "notes": ""
 }
 ```
+
+For a gated board, the user-capture handoff writes one entry with `"method": "user-capture"`, `"disposition": "user-capture"`, the careers URL the user opened, and `capturePath` pointing at the saved file under `triage/<dir>/captures/`. Ingest that file with `paginate --input <file>` — the rest of the pipeline is unchanged.
 
 ## Corpus (jobs-ingest output)
 
