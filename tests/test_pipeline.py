@@ -3621,6 +3621,8 @@ class AgentBrowserVersionFloorTests(unittest.TestCase):
                  "NETWORK_JOBS_HOME": str(tmp / "data")})
         self.assertIn("WARN agent-browser 0.38.1 < 0.39.1", proc.stdout)
         self.assertIn("network-jobs update", proc.stdout)
+        self.assertIn(f"npm i -g agent-browser@{self._min_version()}", proc.stdout)
+        self.assertNotIn("@latest", proc.stdout)
 
     @unittest.skipUnless(
         all(shutil.which(t) for t in ("jq", "curl", "unzip")),
@@ -3646,27 +3648,37 @@ class AgentBrowserVersionFloorTests(unittest.TestCase):
         self.assertIn("agent-browser 0.38.1 < 0.39.1", proc.stdout)
         self.assertIn("network-jobs update", proc.stdout)
 
-    def test_setup_install_path_verifies_what_landed(self):
-        # A stale registry mirror or proxy can serve a build below the floor;
-        # setup must not report "installed" without checking the result.
-        tmp = Path(tempfile.mkdtemp(prefix="nj-ab-install-"))
-        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+    def _min_version(self) -> str:
+        return json.loads((ROOT / "package.json").read_text())["agentBrowser"]["minVersion"]
+
+    def _fake_npm(self, tmp: Path, landed_version: str) -> Path:
         fake_bin = tmp / "fakebin"
         installed_bin = tmp / "prefix" / "bin"
-        fake_bin.mkdir(parents=True)
-        installed_bin.mkdir(parents=True)
+        fake_bin.mkdir(parents=True, exist_ok=True)
+        installed_bin.mkdir(parents=True, exist_ok=True)
         npm = fake_bin / "npm"
         npm.write_text(
             "#!/usr/bin/env bash\n"
             'case "$1" in\n'
             '  --version) echo 10.9.0 ;;\n'
             '  prefix) printf "%s\\n" "$FAKE_PREFIX" ;;\n'
-            '  install) if [[ "$*" == *agent-browser* ]]; then\n'
-            '      printf \'#!/usr/bin/env bash\\necho "agent-browser 0.30.0"\\n\''
+            '  install) printf "%s\\n" "$*" > "$FAKE_PREFIX/install-args"\n'
+            '    if [[ "$*" == *agent-browser* ]]; then\n'
+            f'      printf \'#!/usr/bin/env bash\\necho "agent-browser {landed_version}"\\n\''
             ' > "$FAKE_PREFIX/bin/agent-browser";\n'
             '      chmod +x "$FAKE_PREFIX/bin/agent-browser"; fi ;;\n'
             "esac\nexit 0\n")
         npm.chmod(0o755)
+        return fake_bin
+
+    def test_setup_install_path_verifies_what_landed(self):
+        # A stale registry mirror or proxy can serve a build below the floor;
+        # setup must not report "installed" without checking the result.
+        tmp = Path(tempfile.mkdtemp(prefix="nj-ab-install-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        fake_bin = self._fake_npm(tmp, "0.30.0")
+        installed_bin = tmp / "prefix" / "bin"
+        floor = self._min_version()
         proc = self._bash(
             f'HOME="{tmp / "home"}" bash "{ROOT}/setup" --agent auto --no-launcher',
             env={"PATH": f"{fake_bin}:{installed_bin}:/usr/bin:/bin:/usr/sbin",
@@ -3675,6 +3687,72 @@ class AgentBrowserVersionFloorTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("Installing agent-browser", proc.stdout)
         self.assertIn("below the floor", proc.stdout)
+        spec = (tmp / "prefix" / "install-args").read_text()
+        self.assertIn(f"agent-browser@{floor}", spec)
+        self.assertNotIn("@latest", spec)
+
+    def test_setup_upgrade_path_pins_min_version(self):
+        # A below-floor install is upgraded to the package.json floor, not
+        # @latest, and the post-upgrade check still reports what landed.
+        tmp, stale_bin = self._shim("0.30.0")
+        fake_bin = self._fake_npm(tmp, self._min_version())
+        floor = self._min_version()
+        # Leave prefix/bin off PATH so refresh_tool_path prepends it after
+        # install, the same way a real npm global bin would land in front.
+        proc = self._bash(
+            f'HOME="{tmp / "home"}" bash "{ROOT}/setup" --agent auto --no-launcher',
+            env={"PATH": f"{fake_bin}:{stale_bin}:/usr/bin:/bin:/usr/sbin",
+                 "NETWORK_JOBS_HOME": str(tmp / "data"),
+                 "FAKE_PREFIX": str(tmp / "prefix")})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn(f"Upgrading agent-browser 0.30.0 → {floor}", proc.stdout)
+        self.assertIn(f"agent-browser {floor} (upgraded from 0.30.0)", proc.stdout)
+        spec = (tmp / "prefix" / "install-args").read_text()
+        self.assertIn(f"agent-browser@{floor}", spec)
+        self.assertNotIn("@latest", spec)
+
+    def test_setup_warns_when_min_version_missing(self):
+        # No agentBrowser.minVersion: still install (browser is optional) but
+        # say so — otherwise the floor check is a silent no-op.
+        tmp = Path(tempfile.mkdtemp(prefix="nj-ab-nomin-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        suite = tmp / "suite"
+        shutil.copytree(ROOT / "lib", suite / "lib")
+        shutil.copytree(ROOT / "skills", suite / "skills")
+        shutil.copy(ROOT / "setup", suite / "setup")
+        pkg = json.loads((ROOT / "package.json").read_text())
+        pkg.pop("agentBrowser", None)
+        (suite / "package.json").write_text(json.dumps(pkg))
+        fake_bin = self._fake_npm(tmp, "0.40.0")
+        installed_bin = tmp / "prefix" / "bin"
+        proc = self._bash(
+            f'HOME="{tmp / "home"}" bash "{suite / "setup"}" --agent auto --no-launcher',
+            env={"PATH": f"{fake_bin}:{installed_bin}:/usr/bin:/bin:/usr/sbin",
+                 "NETWORK_JOBS_HOME": str(tmp / "data"),
+                 "FAKE_PREFIX": str(tmp / "prefix")})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("Installing agent-browser", proc.stdout)
+        self.assertIn("package.json has no agentBrowser.minVersion", proc.stdout)
+        self.assertIn("installed unpinned", proc.stdout)
+        spec = (tmp / "prefix" / "install-args").read_text()
+        self.assertRegex(spec, r'(^| )agent-browser( |$)')
+        self.assertNotIn("@latest", spec)
+        self.assertNotIn("@0.", spec)
+
+    @unittest.skipUnless(
+        all(shutil.which(t) for t in ("jq", "curl", "unzip")),
+        "doctor requires jq/curl/unzip")
+    def test_doctor_missing_browser_hint_is_pinned(self):
+        tmp = Path(tempfile.mkdtemp(prefix="nj-ab-doc-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        floor = self._min_version()
+        proc = self._bash(
+            f'"{ROOT}/bin/network-jobs" doctor',
+            env={"PATH": os.environ["PATH"],
+                 "NETWORK_JOBS_HOME": str(tmp / "data")})
+        self.assertIn("WARN agent-browser missing", proc.stdout)
+        self.assertIn(f"npm i -g agent-browser@{floor}", proc.stdout)
+        self.assertNotIn("@latest", proc.stdout)
 
 
 class InventoryPipelineTests(unittest.TestCase):

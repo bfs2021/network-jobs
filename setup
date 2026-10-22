@@ -118,60 +118,74 @@ refresh_tool_path() {
 }
 
 # --- browser automation (default on; needed for JS-heavy career pages) ---
-# Presence is not enough: a stale build can advertise a command in `--version`
-# help text and reject it at runtime, so compare against agentBrowser.minVersion
-# and upgrade only when below the floor (never just because a newer build exists).
+# Presence is not enough: compare against agentBrowser.minVersion and upgrade
+# only when below the floor (never just because a newer build exists).
+# Pin the install/upgrade spec to that floor from package.json — one source
+# of truth, not a second hardcoded version and not @latest. Read once.
 browser_note=""
+ab_min="$(ab_min_version "$SUITE_ROOT/package.json" || true)"
+if [[ -n "$ab_min" ]]; then
+  ab_spec="agent-browser@${ab_min}"
+else
+  # Don't invent a version. Install untagged, but say so — the floor check
+  # is a no-op when minVersion is missing.
+  ab_spec="agent-browser"
+fi
 if command -v agent-browser >/dev/null 2>&1; then
   ab_have="$(ab_installed_version || true)"
-  ab_min="$(ab_min_version "$SUITE_ROOT/package.json" || true)"
   ab_desc="$(ab_describe_version "$ab_have" "$ab_min")"
   if [[ "$ab_desc" == *" < "* ]]; then
     if [[ "$WITH_BROWSER" -eq 1 ]] && NPM_BIN="$(resolve_npm)"; then
       echo "Upgrading agent-browser $ab_have → $ab_min (below the supported floor)…"
-      if "$NPM_BIN" install -g agent-browser@latest >/dev/null 2>&1; then
+      if "$NPM_BIN" install -g "$ab_spec" >/dev/null 2>&1; then
         refresh_tool_path "$NPM_BIN"
         ab_new="$(ab_installed_version || true)"
         ab_desc="$(ab_describe_version "$ab_new" "$ab_min")"
         if [[ "$ab_desc" == *" < "* || "$ab_desc" == "unknown" ]]; then
-          browser_note="agent-browser $ab_desc — upgrade did not reach the floor (run: $NPM_BIN i -g agent-browser@latest)"
+          browser_note="agent-browser $ab_desc — upgrade did not reach the floor (run: $NPM_BIN i -g $ab_spec)"
         else
           browser_note="agent-browser $ab_desc (upgraded from $ab_have)"
         fi
       else
-        browser_note="agent-browser $ab_desc — upgrade failed (run: $NPM_BIN i -g agent-browser@latest)"
+        browser_note="agent-browser $ab_desc — upgrade failed (run: $NPM_BIN i -g $ab_spec)"
       fi
     else
       browser_note="agent-browser $ab_desc — run: network-jobs update"
     fi
   else
-    browser_note="agent-browser ${ab_desc}"
+    if [[ -z "$ab_min" ]]; then
+      browser_note="agent-browser ${ab_desc} — package.json has no agentBrowser.minVersion; floor not checked"
+    else
+      browser_note="agent-browser ${ab_desc}"
+    fi
   fi
 elif [[ "$WITH_BROWSER" -eq 1 ]]; then
   if NPM_BIN="$(resolve_npm)"; then
     echo "Installing agent-browser…"
-    if "$NPM_BIN" install -g agent-browser >/dev/null 2>&1; then
+    if "$NPM_BIN" install -g "$ab_spec" >/dev/null 2>&1; then
       refresh_tool_path "$NPM_BIN"
       if command -v agent-browser >/dev/null 2>&1; then
         # Verify what actually landed: a stale registry mirror or proxy can
         # serve a build below the floor, and "installed" would then be a lie.
-        ab_min="$(ab_min_version "$SUITE_ROOT/package.json" || true)"
         ab_new="$(ab_installed_version || true)"
         ab_desc="$(ab_describe_version "$ab_new" "$ab_min")"
         case "$ab_desc" in
-          *" < "*) browser_note="agent-browser $ab_desc — installed but below the floor (run: $NPM_BIN i -g agent-browser@latest)" ;;
+          *" < "*) browser_note="agent-browser $ab_desc — installed but below the floor (run: $NPM_BIN i -g $ab_spec)" ;;
           unknown) browser_note="agent-browser installed (version unknown)" ;;
           *) browser_note="agent-browser $ab_desc installed" ;;
         esac
+        if [[ -z "$ab_min" ]]; then
+          browser_note="${browser_note} — package.json has no agentBrowser.minVersion; installed unpinned, floor not checked"
+        fi
       else
         npm_prefix="$("$NPM_BIN" prefix -g 2>/dev/null || true)"
         browser_note="agent-browser installed to ${npm_prefix:-npm global}/bin (add it to PATH)"
       fi
     else
-      browser_note="agent-browser install failed (run: $NPM_BIN i -g agent-browser)"
+      browser_note="agent-browser install failed (run: $NPM_BIN i -g $ab_spec)"
     fi
   else
-    browser_note="no usable npm found — install node, then: npm i -g agent-browser"
+    browser_note="no usable npm found — install node, then: npm i -g $ab_spec"
   fi
 else
   browser_note="agent-browser skipped (--no-browser)"

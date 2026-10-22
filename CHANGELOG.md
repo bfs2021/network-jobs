@@ -27,6 +27,12 @@
   returns `[]` would otherwise wipe the company. A company that already
   had zero open rows can still record empty. `blocked` / `captured`
   remain never-expire.
+- `setup` installs and upgrades `agent-browser` pinned to
+  `agentBrowser.minVersion` in `package.json`, instead of `@latest`.
+  `doctor` recovery hints use the same pin. A missing minVersion prints a
+  warning and installs untagged rather than failing silently. The
+  version-floor check after install is unchanged. The old comment about a
+  stale build advertising a command in `--version` help is gone.
 - One shared reader for the artifact: `network_jobs.matches.load_matches()`
   (plus `normalize_matches` / `write_matches`) is now used by
   `fetch-descriptions`, `match-prefs`' description restore, `review-matches`,
