@@ -30,6 +30,17 @@
   installs whose directory is on `PATH` keep the bare `network-jobs`.
 
 ### Fixed
+- `INVENTORY.md` no longer duplicates **`Listings`** and **`Pagination`** when
+  a triage dir came from the `stage-company.sh` skeleton. The helpers patch the
+  skeleton's header placeholders *and* write the Pipeline summary block, so the
+  real stage → paginate → match flow showed each label twice. The block is now
+  their canonical home: the existing-file path removes the header copies after
+  writing it, including duplicates from hand-edited files, and old triage dirs
+  heal on the next helper write. Only labels the block actually renders are
+  removed, so a manual card extract with no `index/pagination.json` keeps its
+  header `Pagination` line (`status=captured`). A hand-filled `Status` is
+  preserved, but a skeleton placeholder is still patched from the listing count
+  (`(pending)` with zero rows becomes `blocked`).
 - Staging silently dropped distinct postings whose board reuses one
   `requisition_id` (Greenhouse): `requisition_id` outranked the per-posting
   `id` in both `ID_KEYS` and `fingerprint.ats_id()`, so the fingerprint dedupe

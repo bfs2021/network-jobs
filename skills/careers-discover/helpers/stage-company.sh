@@ -78,6 +78,11 @@ if [[ ! -f "$DIR/index/listings.json" ]]; then
 fi
 
 if [[ ! -f "$DIR/INVENTORY.md" ]]; then
+  # Pre-helper placeholders. Once a helper writes the Pipeline summary block,
+  # `Listings` (and `Pagination` when there is pagination data) are canonical
+  # there and these header copies are removed (#63). Keeping the placeholders
+  # helps a manual card extract: it has no summary block and keeps its
+  # hand-filled header `Pagination` line.
   cat > "$DIR/INVENTORY.md" <<EOF
 # Careers triage — ${NAME}
 

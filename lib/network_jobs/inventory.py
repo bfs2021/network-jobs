@@ -10,11 +10,16 @@ from typing import Any
 MARKER_START = "<!-- nj-summary:start -->"
 MARKER_END = "<!-- nj-summary:end -->"
 
-# Header fields the helpers own. They must agree with index/*.json, so they
-# are patched by code rather than left to the model (see #33).
+# Header fields the helpers own. render_summary_block is the canonical home for
+# the ones it emits (SUMMARY_BLOCK_FIELDS); the header keeps `Careers URL` and
+# `Status`. `Status` is patched from index/*.json when the summary has
+# pagination data or when the header still holds a placeholder (`(pending)`,
+# empty); a hand-filled value is preserved (see #63).
 HEADER_FIELDS = ("Listings", "Careers URL", "Pagination", "Status")
-# Of those, the ones render_summary_block also emits. A fresh file must not
-# repeat them in the header, so each label appears exactly once (#55).
+# Of those, render_summary_block can also emit. The summary block is their
+# canonical home when it renders them, so the header must not repeat them and
+# each label appears exactly once per file (#55, #63). A block that omits
+# Pagination (no pagination data) leaves the header line in place.
 SUMMARY_BLOCK_FIELDS = ("Listings", "Pagination")
 # prefs.match_listings histograms the missing `department` as this sentinel.
 UNKNOWN_DEPARTMENT = "(none)"
@@ -130,6 +135,67 @@ def patch_inventory_header(text: str, values: dict[str, str]) -> str:
     return head + tail
 
 
+def _strip_summary_fields_from_header(
+    text: str, labels: tuple[str, ...] | list[str] = SUMMARY_BLOCK_FIELDS
+) -> str:
+    """Drop the given summary-block labels from the header, before the first `## `.
+
+    stage-company.sh writes a skeleton whose header carries `Listings` and
+    `Pagination` placeholders. patch_inventory_header updates them, but the
+    summary block also emits them, so an existing template showed each label
+    twice (#63). The summary block is now the canonical home for the fields it
+    actually renders: `Listings` always, `Pagination` only when the summary has
+    pagination data. A manual card extract without `pagination.json` keeps its
+    header `Pagination` line (usually `status=captured`, incomplete evidence).
+    """
+    cut = len(text)
+    heading = text.find("\n## ")
+    if heading >= 0:
+        cut = heading + 1
+    marker = text.find(MARKER_START)
+    if 0 <= marker < cut:
+        cut = marker
+    head, tail = text[:cut], text[cut:]
+    for label in labels:
+        # No count: a hand-edited header with two copies must heal fully.
+        head = re.sub(
+            rf"^- \*\*{re.escape(label)}:\*\*[^\n]*(?:\n|$)", "", head, flags=re.M
+        )
+    return head + tail
+
+
+def _rendered_field_labels(block: str) -> list[str]:
+    """The `- **Label:**` labels a rendered summary block carries, in order."""
+    return re.findall(r"^- \*\*([^*\n]+):\*\*", block, re.M)
+
+
+# Values stage-company.sh leaves for the helpers or the agent to fill. A
+# placeholder is safe to overwrite; a real hand-filled value is evidence.
+_PLACEHOLDER_HEADER_VALUES = frozenset({"", "(pending)", "(fill)"})
+
+
+def _header_region(text: str) -> str:
+    """The header block: before the summary marker or the first `## ` heading."""
+    marker = text.find(MARKER_START)
+    if marker >= 0:
+        return text[:marker]
+    match = re.search(r"\n## ", text)
+    return text[: match.start() + 1] if match else text
+
+
+def _header_field_value(text: str, label: str) -> str | None:
+    """The current header value of `label`, or None when the line is absent."""
+    match = re.search(
+        rf"^- \*\*{re.escape(label)}:\*\*([^\n]*)", _header_region(text), re.M
+    )
+    return match.group(1).strip() if match else None
+
+
+def _is_placeholder_header_value(value: str | None) -> bool:
+    """True when the header value is missing or a skeleton placeholder."""
+    return value is None or value.strip().lower() in _PLACEHOLDER_HEADER_VALUES
+
+
 def department_histogram_line(departments: dict[str, int], limit: int = 12) -> str:
     items = sorted(departments.items(), key=lambda kv: (-kv[1], kv[0]))[:limit]
     if not items:
@@ -179,6 +245,13 @@ def upsert_inventory(path: Path, summary: dict[str, Any]) -> None:
     header = _header_values(summary)
     if path.is_file():
         text = path.read_text()
+        if not (isinstance(summary.get("pagination"), dict) and summary["pagination"]):
+            # No helper pagination data. Preserve a hand-filled Status (a
+            # manual extract's `captured` is evidence), but never leave a
+            # skeleton placeholder behind: patch it from the listing count, so
+            # zero rows still become `blocked` (#63).
+            if not _is_placeholder_header_value(_header_field_value(text, "Status")):
+                header.pop("Status", None)
         text = patch_inventory_header(text, header)
         if MARKER_START in text and MARKER_END in text:
             text = re.sub(
@@ -190,6 +263,14 @@ def upsert_inventory(path: Path, summary: dict[str, Any]) -> None:
             )
         else:
             text = text.rstrip() + "\n\n## Pipeline summary\n\n" + block
+        # The skeleton's header placeholders were just updated, but the block
+        # above is now their canonical home: drop the duplicates (#63). Only
+        # strip what this block actually rendered, or a manual card extract
+        # without pagination data would lose its header Pagination line.
+        rendered = set(_rendered_field_labels(block))
+        text = _strip_summary_fields_from_header(
+            text, [label for label in SUMMARY_BLOCK_FIELDS if label in rendered]
+        )
         path.write_text(text if text.endswith("\n") else text + "\n")
     else:
         name = summary.get("company") or "company"

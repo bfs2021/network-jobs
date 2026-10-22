@@ -260,9 +260,11 @@ normalizes it to this object.
 
 Required. Summarize: company, careers URL used, listing count, caveats, suggested next steps.
 
-The top header block carries machine-readable fields — `Slug`, `Date`, `Careers URL`, `Listings`, `Pagination`, `Status`. `stage-company.sh` writes placeholders; `paginate`, `match-prefs` and `crawl-state` replace them from `index/*.json` on every write (`lib/network_jobs/inventory.py`), so the header always agrees with the data files. `Careers URL` comes from the rows' `sourceUrl` (the crawled endpoint) when available.
+The top header block carries `Slug`, `Date`, `Careers URL`, `Status`, plus free-form fields (`Caveats`, `Next steps`). `stage-company.sh` writes placeholders; `paginate`, `match-prefs` and `crawl-state` refresh `Careers URL` from `index/*.json` on every write (`lib/network_jobs/inventory.py`). `Status` is refreshed when the summary has pagination data, or when the header still holds a placeholder (`(pending)`/empty); a hand-filled value (`captured`, `truncated (manual card extract)`) is preserved. Free-form fields are never patched. `Careers URL` comes from the rows' `sourceUrl` (the crawled endpoint) when available.
 
-Helpers also append a `<!-- nj-summary -->` block with **N of M match prefs**, a department histogram, and pagination. Do not dump the full board into chat — point at `matches.json`.
+`Listings` — and `Pagination` when the helper has pagination data — live in the `<!-- nj-summary -->` block, which is their canonical home: each label appears exactly once per file. The `Listings`/`Pagination` header lines that `stage-company.sh` writes are pre-helper placeholders and are removed on the first helper write that renders them; a manual extract without `index/pagination.json` keeps its header `Pagination` line untouched.
+
+Helpers also append a `<!-- nj-summary -->` block with **N of M match prefs**, a department histogram, and — when available — pagination. Do not dump the full board into chat — point at `matches.json`.
 
 ### fetch-log/
 
