@@ -4,7 +4,7 @@ description: Find company career pages and stage open job listings into local tr
 license: MIT
 allowed-tools: Bash(*)
 metadata:
-  version: "1.0.0"
+  version: "1.1.0"
 ---
 
 # Careers Discover
@@ -27,6 +27,23 @@ Read [SCHEMA.md](../../SCHEMA.md) first. Pattern inspired by Provenance `source-
 - No ATS allowlist / no Greenhouse-Lever-Ashby parser code. Prefer whatever public page or JSON the site exposes.
 - One company (or small batch the user approved) per focused run when possible — cleaner logs.
 
+## Asking the user
+
+Whenever the next step is picking from a known set, use the host's choice tool —
+`AskUserQuestion` (Claude Code), `question` (opencode), `ask_user_choice`, or the
+harness equivalent — instead of a prose list.
+
+- **One question per call.** Ask it, wait for the answer, then ask the next.
+  Never bundle two questions into one prompt or one tool call, even when the
+  tool accepts several.
+- **Recommend, and say why.** Lead with the option you would pick and a one-line
+  reason.
+- Put the deciding data in the option label (match counts, department, family),
+  never in surrounding prose the user has to correlate.
+- Always keep a free-text / "none of these" path.
+- No such tool in this host? Use a short numbered list, recommendation first,
+  never more than 4 options.
+
 ## Workflow
 
 ```bash
@@ -38,10 +55,11 @@ SUITE="${NETWORK_JOBS_SUITE:-${SUITE:-}}"
 1. **Pick companies**
    - Read `$DATA/companies/companies.json`
    - Prefer high `connectionCount`, or filter by user query
+   - If the user named no companies, ask **one question** — a multi-select over the top ~8 by connection count (counts in the labels) — and run only what they pick. Recommend the top 3 by `connectionCount`.
    - If `preferences.json` lists `categories` / `notes`, bias toward matching companies when the user has not named any
    - If `formerEmployerPolicy` is `exclude` (default when set), **skip** companies in `formerEmployers` unless the user explicitly named them
-   - If policy is `ask` and a top company is a former employer, call that out and confirm before discovering
-   - Ask before bulk-running more than ~5 companies in one go
+   - If policy is `ask` and a top company is a former employer, call that out and ask **one multi-select** over the flagged companies (recommended: include none of them this run) before discovering.
+   - Ask before bulk-running more than ~5 companies in one go, as **one question** (recommended: start with the top 3–5 by connection count).
 
    High connection counts at former employers are common and **not** automatically a signal to prioritize those companies.
 
@@ -54,7 +72,7 @@ SUITE="${NETWORK_JOBS_SUITE:-${SUITE:-}}"
    2. Web search: `"{company}" careers` / `"{company}" jobs`
    3. Company homepage → follow Careers/Jobs nav
    4. If blocked or SPA-only → `agent-browser` (snapshot → refs)
-   5. If still blocked → ask user to save/share the page (CDP / manual capture)
+   5. If still blocked → ask **one question**: save the page and point me at the file, share a CDP endpoint, or stop here (recommended when the site hard-blocks: stop rather than invent openings).
 
 4. **Extract listings**
    - Prefer structured JSON if the page or network tab exposes a jobs API
@@ -166,9 +184,9 @@ before/after counts.
 
 9. **Hand off (hard stop)**
    - Point at each triage dir. Quote the helper’s `showing` line (e.g. `14 of 120 match prefs`) — do not paste the full listings array.
-   - Offer `review-matches` to walk families before ingest (“18 matched across 4 families — want to veto any?”). Present the veto choice with the host's structured question tool when one is available (multi-select over families, counts in the labels), not a prose list.
-   - If the run surfaced something that looks like a **suite defect** rather than a site quirk (malformed listings, dedup collapse, zero-yield pagination on a board that should list), say so and offer to file it: `network-jobs report --dry-run` first, show the bundle, and only file after explicit confirmation.
-   - Ask whether to run `jobs-ingest` on **matches** (default), **all** listings, or a department slice.
+   - Offer `review-matches` to walk families before ingest (“18 matched across 4 families — want to veto any?”). Ask it as **one multi-select** over families, with match counts in the labels and your recommended vetoes marked, not a prose list.
+   - If the run surfaced something that looks like a **suite defect** rather than a site quirk (malformed listings, dedup collapse, zero-yield pagination on a board that should list), say so and offer to file it: `network-jobs report --dry-run` first, show the bundle, and only file after explicit confirmation (one question: file it / show me the bundle first).
+   - Then ask **one question**: run `jobs-ingest` on **matches** (recommended — the board was already scored against prefs), **all** listings, or a department slice. Put the counts in the labels (`matches — 14`, `all — 120`, `Engineering — 31`).
    - **STOP.** Do **not** invoke `jobs-ingest`, rebuild the corpus, or resume a job search in the same turn.
    - Only after the user explicitly confirms (e.g. “ingest these”, “ingest matches”, “ingest all”, “promote the Google batch”) should you load **jobs-ingest**.
 
@@ -197,7 +215,7 @@ Workflow: open URL → snapshot → interact by refs → re-snapshot after DOM c
 
 ### 3. User capture / CDP
 
-Use when tier 2 still can’t see listings (hard login, hard captcha, geo block). Ask the user to save/share the page; stage from that capture. Do not invent openings.
+Use when tier 2 still can’t see listings (hard login, hard captcha, geo block). Ask **one question** — save/share the page (recommended), share a CDP endpoint, or stop — then stage from that capture. Do not invent openings.
 
 ### Decision rule
 
@@ -205,7 +223,7 @@ Use when tier 2 still can’t see listings (hard login, hard captcha, geo block)
 try WebFetch/curl
   → real listings?        stage them
   → empty / JS / challenge?  agent-browser once
-  → still blocked?           ask user (stop automating)
+  → still blocked?           ask one question (save/share capture, or stop)
 ```
 
 Never start with agent-browser for a simple static page. Never keep retrying browser against a hard auth wall.

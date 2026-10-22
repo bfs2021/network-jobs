@@ -4,7 +4,7 @@ description: Find jobs where you're already connected. Search openings in your l
 license: MIT
 allowed-tools: Bash(*)
 metadata:
-  version: "3.1.0"
+  version: "3.2.0"
 ---
 
 # Network Jobs
@@ -42,6 +42,24 @@ cat "$DATA/corpus/manifest.json"
 **Seniority buckets:** `senior`, `mid`  
 **Categories:** see reference.md
 
+## Asking the user
+
+Whenever the next step is picking from a known set, use the host's choice tool —
+`AskUserQuestion` (Claude Code), `question` (opencode), `ask_user_choice`, or the
+harness equivalent — instead of a prose list.
+
+- **One question per call.** Ask it, wait for the answer, then ask the next.
+  Never bundle two questions into one prompt or one tool call, even when the
+  tool accepts several.
+- **Recommend, and say why.** Lead with the option you would pick and a one-line
+  reason ("Recommended: exclude — keeps the search focused, and you can opt
+  back in per run").
+- Put the deciding data in the option label (count, fit, family), never in
+  surrounding prose the user has to correlate.
+- Always keep a free-text / "none of these" path.
+- No such tool in this host? Use a short numbered list, recommendation first,
+  never more than 4 options.
+
 ## Procedures
 
 **First step for all patterns:** load profile + preferences + manifest.
@@ -55,11 +73,11 @@ jq . "$DATA/corpus/manifest.json"
 
 ### Empty / first-run gate (STOP here)
 
-If `companies/companies.json` is missing → run **network-jobs-import** (or ask for a LinkedIn ZIP). Do not invent a graph.
+If `companies/companies.json` is missing → ask **one question**: import a LinkedIn ZIP now (recommended — without a graph there is no ranking and no intro matching) or continue without one. Then run **network-jobs-import**. Do not invent a graph.
 
-If `profile.json` `name` or `email` is empty → run **network-jobs-setup** (resume import + profile). Discovery can proceed without a profile; search + intros should not.
+If `profile.json` `name` or `email` is empty → ask **one question**: set up the profile now or after this search (recommended: now for search/intros, later for discovery). Then run **network-jobs-setup** (resume import + profile).
 
-If `preferences.json` is missing or `interviewComplete` is not true → offer **network-jobs-setup** preferences interview (location, remote/hybrid/onsite, roles) before broad searches. User can skip and override per query.
+If `preferences.json` is missing or `interviewComplete` is not true → ask **one question** before broad searches: run the 3–6 question setup interview now (recommended) or override location/mode/roles for this query only.
 
 If `manifest.totalJobs` is 0 or `lastUpdated` is null:
 
@@ -79,7 +97,7 @@ When the user does **not** specify location / mode / seniority / category / trac
 3. Honor `workModes` **with location scope**:
    - `remote` only → prefer `locationBucket=remote`.
    - Includes `hybrid` / `onsite` → include city buckets that match `onsiteLocations` / `locations` / `locationBuckets` — **not** every non-remote job worldwide.
-   - If `hybrid`/`onsite` is set but `onsiteLocations` is empty, ask once or fall back to `locations` / city `locationBuckets` only; never expand to global onsite.
+   - If `hybrid`/`onsite` is set but `onsiteLocations` is empty, ask **one question** — which metros count, offering the `locations` / city `locationBuckets` cities as a recommended multi-select — then fall back to `locations` / city `locationBuckets` only; never expand to global onsite.
 4. Honor `track` when filtering titles: `manager` → prefer Manager/Director/Head/EM/VP people-lead titles; `ic` → de-prioritize pure people-manager titles unless query asks; `either` → no track filter. Prefer the persisted `track` field on the job when present.
 5. Honor `senioritySignals`: intern roles only when asked; `staff+` when the user wants Staff/Principal.
 6. Soft-filter with `locations` / parsed `locations[].city`, `industries`, `companyStages`, `mustHaves`, `dealBreakers`, `notes`, `salaryMin` in judgment — do not invent salary on jobs that lack it.
@@ -87,7 +105,7 @@ When the user does **not** specify location / mode / seniority / category / trac
 7. **Former employers:** read `formerEmployers` + `formerEmployerPolicy`.
    - `exclude` — omit those companies from default result sets (still show if the user named the company).
    - `include` — treat like any other company.
-   - `ask` — if matches appear, list them separately and ask before emphasizing / expanding.
+   - `ask` — if matches appear, surface them separately and ask **one multi-select** over the flagged companies (recommended: exclude all — they are former employers for a reason).
    Match company names case-insensitively / lightly normalized (ignore Inc, LLC, etc.).
 8. If the user query conflicts with prefs, **query wins**.
 
@@ -126,11 +144,11 @@ known boards (oldest first) and stages new matches under `triage/`.
 
 ### Pattern B2: Broad queries
 
-Ask for role type, location, seniority before loading every shard.
+Ask role type, then location, then seniority — **three separate single-question calls**, each recommending the value from `preferences.json` — before loading every shard.
 
 ### Pattern C: "What's new?"
 
-Sort preferred category (or ask) by `firstSeen` desc; show latest ~10.
+Sort preferred category (or ask) by `firstSeen` desc; show latest ~10. If there is no preferred category, ask **one question** over the top categories, recommending the last-searched one.
 
 ### Pattern D: Remote / location-only
 
@@ -170,8 +188,9 @@ Two uses:
 2. **After a search** — cross-reference the ranked companies against each
    fetched pack. When there's overlap, flag it with counts:
    "3 of your top 10 are at companies where Frank Harris has 10+ connections —
-   Stripe (12), Figma (9). Want me to draft the ask?" The ask itself goes
-   through the **intro-email-generator** skill with the pack owner as the
+   Stripe (12), Figma (9). Want me to draft the ask?" Ask that as **one
+   question** (recommended: yes when three or more overlap). The ask itself
+   goes through the **intro-email-generator** skill with the pack owner as the
    forwarder.
 
 ## Output Format

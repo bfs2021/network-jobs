@@ -4,7 +4,7 @@ description: Import a LinkedIn connections ZIP into the local Network Jobs graph
 license: MIT
 allowed-tools: Bash(*)
 metadata:
-  version: "1.0.0"
+  version: "1.1.0"
 ---
 
 # Network Jobs Import
@@ -17,6 +17,24 @@ Read [SCHEMA.md](../../SCHEMA.md) first.
 
 - Path to LinkedIn ZIP (preferred) or a bare `Connections.csv`
 - Optional: `--min-count N` (default 1) — drop companies with fewer than N connections when summarizing
+
+## Asking the user
+
+Whenever the next step is picking from a known set, use the host's choice tool —
+`AskUserQuestion` (Claude Code), `question` (opencode), `ask_user_choice`, or the
+harness equivalent — instead of a prose list.
+
+- **One question per call.** Ask it, wait for the answer, then ask the next.
+  Never bundle two questions into one prompt or one tool call, even when the
+  tool accepts several.
+- **Recommend, and say why.** Lead with the option you would pick and a one-line
+  reason ("Recommended: merge Meta → Facebook — 38 connections otherwise split
+  across two rows").
+- Put the deciding data in the option label (connection counts, both names),
+  never in surrounding prose the user has to correlate.
+- Always keep a free-text / "none of these" path.
+- No such tool in this host? Use a short numbered list, recommendation first,
+  never more than 4 options.
 
 ## Workflow
 
@@ -42,7 +60,7 @@ HELPER="${HELPER:-$SUITE/skills/network-jobs-import/helpers/parse-linkedin.sh}"
    - Total connections kept
    - Companies after ignore-list filtering
    - Top 15 companies by connection count (name + count + sample people)
-4. **Optional fuzzy merge** — If the user asks, or obvious duplicates appear (e.g. “Meta” / “Facebook”), propose merges and write overrides to `$DATA/config/company-overrides.json` as `{ "linkedinName": "...", "matchTo": "..." }`, then re-run the helper.
+4. **Optional fuzzy merge** — If the user asks, or obvious duplicates appear (e.g. “Meta” / “Facebook”), propose the merges as **one multi-select** — each option labelled `Meta → Facebook (38 connections)` with your recommended merges marked — write the accepted ones to `$DATA/config/company-overrides.json` as `{ "linkedinName": "...", "matchTo": "..." }`, then re-run the helper.
 5. **Hand off** — Suggest `careers-discover` on top companies by count.
 
 ## Helper behavior

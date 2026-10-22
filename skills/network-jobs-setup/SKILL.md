@@ -3,7 +3,7 @@ name: network-jobs-setup
 description: First-run setup for the local Network Jobs suite. Use when installing network jobs, importing a resume into profile, running the job-search preferences interview (location, remote/hybrid/onsite), filling profile.json, verifying ~/.network-jobs, or helping export LinkedIn connections.
 license: MIT
 metadata:
-  version: "1.1.0"
+  version: "1.2.0"
 ---
 
 # Network Jobs Setup
@@ -15,6 +15,24 @@ Always read [SCHEMA.md](../../SCHEMA.md) first.
 ## Data home
 
 `NETWORK_JOBS_HOME` or `~/.network-jobs/`.
+
+## Asking the user
+
+Whenever the next step is picking from a known set, use the host's choice tool —
+`AskUserQuestion` (Claude Code), `question` (opencode), `ask_user_choice`, or the
+harness equivalent — instead of a prose list.
+
+- **One question per call.** Ask it, wait for the answer, then ask the next.
+  Never bundle two questions into one prompt or one tool call, even when the
+  tool accepts several.
+- **Recommend, and say why.** Lead with the option you would pick and a one-line
+  reason ("Recommended: senior IC — the resume reads as an IC trajectory and
+  manager seats would widen the search against your own signal").
+- Put the deciding data in the option label (count, fit, family), never in
+  surrounding prose the user has to correlate.
+- Always keep a free-text / "none of these" path.
+- No such tool in this host? Use a short numbered list, recommendation first,
+  never more than 4 options.
 
 ## Workflow
 
@@ -35,10 +53,10 @@ Always read [SCHEMA.md](../../SCHEMA.md) first.
    - Read `$DATA/resume/text.md` when present (else `resume/source.*`).
    - Propose updates to `profile.json`: `name`, `email`, `title`, `company`, `url`.
    - **Do not invent an email.** Only use an address found in the resume or confirmed by the user.
-   - If `profile.json` already has values, show a diff and ask before overwrite.
+   - If `profile.json` already has values, show the diff and ask **one question** — a multi-select over the differing fields to overwrite (all preselected) — then write only the fields kept.
    - Write `~/.network-jobs/profile.json` after confirmation.
 
-   If there is no resume yet, ask for name/email/title manually (same fields).
+   If there is no resume yet, ask for name/email/title as free text, **one question at a time** (these are facts, not choices — free text, not the choice tool).
 
 3. **Preferences interview** (after background is known — **dynamic**)
    Run a short interview **grounded in the resume/profile**. This is not a fixed form.
@@ -46,11 +64,11 @@ Always read [SCHEMA.md](../../SCHEMA.md) first.
    **How to run it**
    1. Skim resume + current `profile.json`. Note likely track (IC vs manager), domains, seniority signals, recent employers, and gaps.
    2. Propose a **draft prefs summary** from what you already know (“Sounds like senior IC product in fintech/devtools, NYC-leaning…”).
-   3. Ask **only the open questions** — skip anything the resume already settles.
-   4. Branch: if they were a manager, ask whether they want to stay on a people-manager track, return to IC, or either; if lifelong IC, ask whether they’re open to managing. Same idea for domain switches, founding vs bigco, etc.
+   3. Ask **only the open questions** — skip anything the resume already settles. Put each one to the user on its own: one question, wait for the answer, then the next. Give your recommended answer and a one-line reason with every one, and let the user reply in their own words instead of picking.
+   4. Branch: if they were a manager, ask **one question** whether they want to stay on a people-manager track, return to IC, or either (recommend whichever their last two roles point at); if lifelong IC, ask **one question** whether they’re open to managing. Same idea for domain switches, founding vs bigco, etc.
    5. Write `$DATA/preferences.json` (SCHEMA). Set `interviewComplete: true` and `updatedAt`. Extra keys OK when useful.
 
-   **Core dimensions to cover if still unknown** (ask conversationally, not as a checklist dump):
+   **Core dimensions to cover if still unknown** (ask conversationally — one question per call, each with a recommendation — not a checklist dump):
 
    | Dimension | Examples |
    |-----------|----------|
@@ -74,36 +92,34 @@ Always read [SCHEMA.md](../../SCHEMA.md) first.
       accepts its affinity neighbors (e.g. `product` also accepts `engineering`,
       `data`, `design`, `operations` — see `CATEGORY_AFFINITY`), so extra
       categories widen the net in directions the user never named. Ask what to
-      drop, not just what to add.
+      drop with **one multi-select** over the proposed set (all preselected,
+      likely drops marked "Recommended to drop"), not just what to add.
     - **Always ask deal-breakers explicitly.** Propose candidates from the
       resume's anti-signals (domains/roles they have never touched, levels they
-      aged out of), then ask directly — including "none". An empty
-      `dealBreakers` with no confirmation reads as "never asked", and
+      aged out of), then ask directly — including "none". Ask as **one
+      multi-select** over the proposed candidates plus a "none — nothing to
+      exclude yet" option (recommended until something has actually cost them).
+      An empty `dealBreakers` with no confirmation reads as "never asked", and
       `match-prefs` will warn on it. Set `dealBreakersConfirmed: true` once
       asked, even when the answer is none.
-    - **Former employers** — LinkedIn graphs are dense with connections at places they used to work. From the resume, list past employers into `formerEmployers`, then ask whether to **include**, **exclude**, or **ask each time** (`formerEmployerPolicy`). Default suggestion: exclude unless they say otherwise.
-   - **Onsite scope** — if they want remote *and* are open to onsite/hybrid, ask *which cities/metros* count. Write those to `onsiteLocations` (and matching buckets). Do not interpret “I’ll consider onsite” as every onsite role globally.
-    - **Trajectory / domain / shape** (the positive side — résumé can't supply
-      it): where they're moving *toward* (not just from), domain leanings
-      within the category (payments, devtools, enterprise…), and role shape
-      (0→1, platform, GTM-adjacent). Record 2–3 sentences in `notes` for
-      narrative use (fit brief, intros) — these are not scored buckets, so
-      keep them out of the structured fields.
+    - **Former employers** — LinkedIn graphs are dense with connections at places they used to work. From the resume, list past employers into `formerEmployers`, then ask **one question**: **include**, **exclude**, or **ask each time** (`formerEmployerPolicy`). Recommended: exclude unless they say otherwise.
+   - **Onsite scope** — if they want remote *and* are open to onsite/hybrid, ask **one question** — which cities/metros count, offering the `locations` / `locationBuckets` cities as the recommended multi-select. Write the answer to `onsiteLocations` (and matching buckets). Do not interpret “I’ll consider onsite” as every onsite role globally.
     - **Trajectory / domain / shape** (the positive side — the resume can't
-      supply it): where they're moving *toward* (not just from), domain
-      leanings within the category (payments, devtools, enterprise…), and
-      role shape (0→1, platform, GTM-adjacent). Record 2–3 sentences in
-      `notes` for narrative use (fit brief, intros) — these are not scored
-      buckets, so keep them out of the structured fields. Also reconcile
-      `targetRoles` with `track` aloud (a VP-seeking `either` still sees
-      Staff IC seats — confirm that's intended) rather than letting them
-      contradict silently.
+      supply it): where they're moving *toward* (not just from), domain leanings
+      within the category (payments, devtools, enterprise…), and role shape
+      (0→1, platform, GTM-adjacent). This one is open-ended, so ask it as free
+      text — still a single question, not a three-part menu — and record 2–3
+      sentences in `notes` for narrative use (fit brief, intros); these are not
+      scored buckets, so keep them out of the structured fields. Then reconcile
+      `targetRoles` with `track` as **one question** (recommending the value the
+      resume supports), so a VP-seeking `either` doesn't silently keep seeing
+      Staff IC seats.
     - Travel, visa/work auth, commute limits — only if relevant
    - Anything the resume makes surprising (“you’ve been EM for 5 years — still want that?”)
 
-   Do **not** ask every dimension every time. Prefer 3–6 tight questions, then confirm the written prefs.
+   Do **not** ask every dimension every time. Prefer 3–6 tight questions — each its own call, each with your recommendation — then confirm the written prefs.
 
-   **STOP** after writing prefs — summarize them and ask what to do next (import LinkedIn / discover roles / search).
+   **STOP** after writing prefs — summarize them, then ask **one question** what to do next: import LinkedIn connections (recommended if the graph is empty), discover roles, or search (recommended if the corpus already has jobs).
 
 4. **LinkedIn export instructions** (if companies graph empty)
    Guide the user:

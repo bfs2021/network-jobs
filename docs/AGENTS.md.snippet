@@ -20,6 +20,12 @@ useful if you want to pin the workflow explicitly in a project's instructions.
 
 - There is no hosted API. Read only local files under `~/.network-jobs/`.
 - Never invent job fields (salary, dates) that were not captured.
+- Any "pick from these options" step uses the host's choice tool (`AskUserQuestion`,
+  `question`, `ask_user_choice`, or equivalent): **one question per call, wait for
+  the answer, then ask the next** — never a bundled prompt or multi-question call.
+  Lead with your recommendation and a one-line reason, put the deciding data in the
+  option labels, and keep a free-text/"none of these" path. Only fall back to a
+  short numbered list (recommendation first, max 4) when the host has no such tool.
 - `careers-discover` stages only; wait for user confirmation before `jobs-ingest`.
 - Prefer `agent-browser` for JS-heavy career sites; fall back to curl/WebFetch.
 - Helpers ship inside each skill folder (`helpers/`); suite root is in `~/.network-jobs/suite-root`.

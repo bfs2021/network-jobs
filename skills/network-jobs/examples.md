@@ -81,19 +81,40 @@ Try searching for similar companies or a broader category.
 
 ---
 
-## Example 3: Broad Query - Ask for Clarification
+## Example 3: Broad Query - Ask One Question at a Time
 
 **User:** "Find me jobs"
 
-**Response:**
+**Response:** three separate choice-tool calls, in order — role, then location, then seniority. Never one prompt or one tool call carrying all three.
+
+Turn 1 (one question; recommendation first):
 ```
-I can search your network! To find the best matches quickly, could you tell me:
+Which role family should I search?
+- Recommended: product — your prefs default and your last three searches
+- engineering
+- design
+- data / ai-ml
+- sales / marketing
+- none of these (type it)
+```
 
-1. **Role type?** (engineering, product, sales, design, data, etc.)
-2. **Location?** (NYC, SF/Bay Area, remote, or anywhere)
-3. **Seniority?** (senior/staff level, or open to all levels)
+Turn 2, after that answer — one question:
+```
+Where should I look?
+- Recommended: remote — your prefs default
+- NYC
+- SF / Bay Area
+- Seattle / Austin
+- none of these (type it)
+```
 
-For example: "Senior engineering jobs in NYC" or "Remote PM roles"
+Turn 3, after that answer — one question:
+```
+Which level?
+- Recommended: senior — what your prefs say you're targeting
+- mid
+- staff+ (Staff/Principal)
+- open to all levels
 ```
 
 ---

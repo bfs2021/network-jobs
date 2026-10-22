@@ -3,7 +3,7 @@ name: intro-email-generator
 description: Crafts compelling, forwardable introduction emails for intro requests. Use when user needs help writing an email asking a mutual connection to introduce them to someone at a company that's hiring. The skill produces emails that can be forwarded without editing.
 license: MIT
 metadata:
-  version: "1.2.1"
+  version: "1.3.0"
 ---
 
 # Intro Email Generator
@@ -33,6 +33,24 @@ People often write the email addressed to the wrong person. They write to the ta
 **Right:** "Hey Mike, I'm interested in the PM role at Acme Corp. Would you be open to connecting me with Sarah?"
 (This is written to the forwarder — they can forward it directly to Sarah)
 
+## Asking the user
+
+Whenever the next step is picking from a known set, use the host's choice tool —
+`AskUserQuestion` (Claude Code), `question` (opencode), `ask_user_choice`, or the
+harness equivalent — instead of a prose list.
+
+- **One question per call.** Ask it, wait for the answer, then ask the next
+  (which role first, then which forwarder). Never bundle two questions into one
+  prompt or one tool call, even when the tool accepts several.
+- **Recommend, and say why.** Lead with the option you would pick and a one-line
+  reason ("Recommended: Mike — he's the strongest tie you named and overlaps the
+  PM title").
+- Put the deciding data in the option label (fit score, company, title overlap),
+  never in surrounding prose the user has to correlate.
+- Always keep a free-text / "none of these" path.
+- No such tool in this host? Use a short numbered list, recommendation first,
+  never more than 4 options.
+
 ## Required Inputs
 
 Gather before generating:
@@ -55,7 +73,7 @@ cat "$DATA/profile.json"
 cat "$DATA/resume/text.md" 2>/dev/null || ls -la "$DATA/resume"
 ```
 
-If resume is missing, ask the user to run `network-jobs profile import <file>` or paste text.
+If resume is missing, ask **one question**: run `network-jobs profile import <file>` (recommended) or paste the text now.
 
 ## Email Structure
 
@@ -138,21 +156,25 @@ If the user found a job using the network-jobs skill:
 - Prefer explicitly reviewed roles: `network-jobs intros --title "..."` /
   `--url ...` / `--company ...` (joins `search/ranked.json` + `connections/connections.json`).
   Bare `network-jobs intros` takes the tail of the last search — fine as a
-  default, but ask first when the user has reviewed specific roles.
+  default, but ask **one question** first when the user has reviewed specific
+  roles (use the reviewed role, recommended, or the last-search tail).
 - Forwarder order measures **title overlap only, never relationship
   strength** (every connection is 1st degree; closeness isn't in the data).
-  Ask who the user actually knows well at that company and pin them with
-  `intros --prefer "Name"` (repeatable) — never present the top scorer as
+  Ask who the user actually knows well at that company — **one question per
+  company**, recommending the strongest title overlap but saying plainly that
+  the data cannot rank closeness — and pin their answer with
+  `intros --prefer "Name"` (repeatable). Never present the top scorer as
   their closest tie.
-- Confirm 1–2 roles and 1–2 forwarders with the user, using the host's
-  structured question tool when one is available (not a prose list):
-  group first (family → specific role, or company → role), offer
-  multi-select where several answers are valid, put the deciding data in
-  the option labels (fit score, company, connection count) — never in
-  surrounding prose the user must correlate — and always keep a free-text
-  path for anything not listed. Prose satisfies the letter of "confirm"
-  but costs the user a summarization task; more than ~4 options must use
-  the picker.
+- Confirm 1–2 roles and 1–2 forwarders with the user, following
+  **Asking the user** above: **one question per call** — role first (group by
+  family → specific role, or company → role), wait for the answer, then ask
+  which forwarder. Offer multi-select only where several answers are genuinely
+  valid. Lead with your recommended role/forwarder and a one-line reason, put
+  the deciding data in the option labels (fit score, company, title overlap,
+  connection count) — never in surrounding prose the user must correlate — and
+  always keep a free-text path for anything not listed. Never bundle the role
+  and forwarder questions into one prompt or one tool call; prose satisfies the
+  letter of "confirm" but costs the user a summarization task.
 - Fetch JD **only** for `fetchJdUrls` (or skip and use `department`)
 - Job seeker name/email may be in ~/.network-jobs/profile.json
 - Generate the intro email using the job details + resume
