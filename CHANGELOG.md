@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- `docs/RELEASE.md` verification steps used `npm view
+  @hirefrank/network-jobs/latest version`, which npm parses as a **path** and
+  fails with `ENOENT` rather than resolving a tarball. Corrected to
+  `npm view @hirefrank/network-jobs version` (`@latest` if the tag is named),
+  with a note that the registry trails a publish by a few minutes and that
+  `npm view --prefer-online` avoids a cached packument.
+
 ## v1.8.0 — 2026-10-22
 
 ### Added

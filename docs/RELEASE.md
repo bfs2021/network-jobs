@@ -22,11 +22,20 @@
 6. Watch the run, then confirm:
 
    ```bash
-   npm view @hirefrank/network-jobs/latest version
+   npm view @hirefrank/network-jobs version
    ```
 
-   The full packument can 404 for a few minutes after a publish while the
-   registry replicates; `/latest` and the website converge first.
+   Mind the spec form: `@hirefrank/network-jobs/latest` is parsed as a **path**,
+   not a dist-tag, and fails with `ENOENT … /latest/package.json`. Write
+   `@hirefrank/network-jobs@latest` if you want to name the tag explicitly.
+
+   The registry can trail the publish by a few minutes (1.8.0: accepted ~18:31,
+   recorded `18:35:22`). The version endpoint can answer `200` while the
+   packument's `dist-tags` still points at the previous release, and `npm view`
+   may serve a cached packument. Re-check with `npm view --prefer-online`, or
+   read `dist-tags` and `time` straight from
+   `https://registry.npmjs.org/@hirefrank%2fnetwork-jobs`. The website converges
+   on its own schedule.
 
 The workflow refuses to publish when the tag doesn't match `package.json`, so a
 mistyped tag fails before anything ships.
@@ -76,7 +85,7 @@ Use when Actions is unavailable or trusted publishing has been removed.
    ```bash
    npm publish            # or: npm stage publish, then approve in the browser
    ```
-3. `npm view @hirefrank/network-jobs/latest version`
+3. `npm view @hirefrank/network-jobs version`
 
 ## Auth notes (manual path, learned 2026-09-29)
 
