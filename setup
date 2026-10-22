@@ -121,22 +121,16 @@ refresh_tool_path() {
 # Presence is not enough: compare against agentBrowser.minVersion and upgrade
 # only when below the floor (never just because a newer build exists).
 # Pin the install/upgrade spec to that floor from package.json — one source
-# of truth, not a second hardcoded version and not @latest.
-ab_pkg_spec() {
-  local min
-  min="$(ab_min_version "$SUITE_ROOT/package.json" || true)"
-  if [[ -n "$min" ]]; then
-    printf 'agent-browser@%s' "$min"
-  else
-    # package.json missing the field: fall back to the untagged package rather
-    # than inventing a version here.
-    printf 'agent-browser'
-  fi
-}
-
+# of truth, not a second hardcoded version and not @latest. Read once.
 browser_note=""
-ab_spec="$(ab_pkg_spec)"
 ab_min="$(ab_min_version "$SUITE_ROOT/package.json" || true)"
+if [[ -n "$ab_min" ]]; then
+  ab_spec="agent-browser@${ab_min}"
+else
+  # Don't invent a version. Install untagged, but say so — the floor check
+  # is a no-op when minVersion is missing.
+  ab_spec="agent-browser"
+fi
 if command -v agent-browser >/dev/null 2>&1; then
   ab_have="$(ab_installed_version || true)"
   ab_desc="$(ab_describe_version "$ab_have" "$ab_min")"
@@ -159,7 +153,11 @@ if command -v agent-browser >/dev/null 2>&1; then
       browser_note="agent-browser $ab_desc — run: network-jobs update"
     fi
   else
-    browser_note="agent-browser ${ab_desc}"
+    if [[ -z "$ab_min" ]]; then
+      browser_note="agent-browser ${ab_desc} — package.json has no agentBrowser.minVersion; floor not checked"
+    else
+      browser_note="agent-browser ${ab_desc}"
+    fi
   fi
 elif [[ "$WITH_BROWSER" -eq 1 ]]; then
   if NPM_BIN="$(resolve_npm)"; then
@@ -176,6 +174,9 @@ elif [[ "$WITH_BROWSER" -eq 1 ]]; then
           unknown) browser_note="agent-browser installed (version unknown)" ;;
           *) browser_note="agent-browser $ab_desc installed" ;;
         esac
+        if [[ -z "$ab_min" ]]; then
+          browser_note="${browser_note} — package.json has no agentBrowser.minVersion; installed unpinned, floor not checked"
+        fi
       else
         npm_prefix="$("$NPM_BIN" prefix -g 2>/dev/null || true)"
         browser_note="agent-browser installed to ${npm_prefix:-npm global}/bin (add it to PATH)"

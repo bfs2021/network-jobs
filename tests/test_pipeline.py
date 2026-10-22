@@ -3621,6 +3621,8 @@ class AgentBrowserVersionFloorTests(unittest.TestCase):
                  "NETWORK_JOBS_HOME": str(tmp / "data")})
         self.assertIn("WARN agent-browser 0.38.1 < 0.39.1", proc.stdout)
         self.assertIn("network-jobs update", proc.stdout)
+        self.assertIn(f"npm i -g agent-browser@{self._min_version()}", proc.stdout)
+        self.assertNotIn("@latest", proc.stdout)
 
     @unittest.skipUnless(
         all(shutil.which(t) for t in ("jq", "curl", "unzip")),
@@ -3708,6 +3710,49 @@ class AgentBrowserVersionFloorTests(unittest.TestCase):
         spec = (tmp / "prefix" / "install-args").read_text()
         self.assertIn(f"agent-browser@{floor}", spec)
         self.assertNotIn("@latest", spec)
+
+    def test_setup_warns_when_min_version_missing(self):
+        # No agentBrowser.minVersion: still install (browser is optional) but
+        # say so — otherwise the floor check is a silent no-op.
+        tmp = Path(tempfile.mkdtemp(prefix="nj-ab-nomin-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        suite = tmp / "suite"
+        shutil.copytree(ROOT / "lib", suite / "lib")
+        shutil.copytree(ROOT / "skills", suite / "skills")
+        shutil.copy(ROOT / "setup", suite / "setup")
+        pkg = json.loads((ROOT / "package.json").read_text())
+        pkg.pop("agentBrowser", None)
+        (suite / "package.json").write_text(json.dumps(pkg))
+        fake_bin = self._fake_npm(tmp, "0.40.0")
+        installed_bin = tmp / "prefix" / "bin"
+        proc = self._bash(
+            f'HOME="{tmp / "home"}" bash "{suite / "setup"}" --agent auto --no-launcher',
+            env={"PATH": f"{fake_bin}:{installed_bin}:/usr/bin:/bin:/usr/sbin",
+                 "NETWORK_JOBS_HOME": str(tmp / "data"),
+                 "FAKE_PREFIX": str(tmp / "prefix")})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("Installing agent-browser", proc.stdout)
+        self.assertIn("package.json has no agentBrowser.minVersion", proc.stdout)
+        self.assertIn("installed unpinned", proc.stdout)
+        spec = (tmp / "prefix" / "install-args").read_text()
+        self.assertRegex(spec, r'(^| )agent-browser( |$)')
+        self.assertNotIn("@latest", spec)
+        self.assertNotIn("@0.", spec)
+
+    @unittest.skipUnless(
+        all(shutil.which(t) for t in ("jq", "curl", "unzip")),
+        "doctor requires jq/curl/unzip")
+    def test_doctor_missing_browser_hint_is_pinned(self):
+        tmp = Path(tempfile.mkdtemp(prefix="nj-ab-doc-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        floor = self._min_version()
+        proc = self._bash(
+            f'"{ROOT}/bin/network-jobs" doctor',
+            env={"PATH": os.environ["PATH"],
+                 "NETWORK_JOBS_HOME": str(tmp / "data")})
+        self.assertIn("WARN agent-browser missing", proc.stdout)
+        self.assertIn(f"npm i -g agent-browser@{floor}", proc.stdout)
+        self.assertNotIn("@latest", proc.stdout)
 
 
 class InventoryPipelineTests(unittest.TestCase):
