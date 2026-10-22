@@ -130,6 +130,29 @@ def patch_inventory_header(text: str, values: dict[str, str]) -> str:
     return head + tail
 
 
+def _strip_summary_fields_from_header(text: str) -> str:
+    """Drop SUMMARY_BLOCK_FIELDS lines from the header, before the first `## `.
+
+    stage-company.sh writes a skeleton whose header carries `Listings` and
+    `Pagination` placeholders. patch_inventory_header updates them, but the
+    summary block also emits them, so an existing template showed each label
+    twice (#63). The summary block is now the canonical home for these fields.
+    """
+    cut = len(text)
+    heading = text.find("\n## ")
+    if heading >= 0:
+        cut = heading + 1
+    marker = text.find(MARKER_START)
+    if 0 <= marker < cut:
+        cut = marker
+    head, tail = text[:cut], text[cut:]
+    for label in SUMMARY_BLOCK_FIELDS:
+        head = re.sub(
+            rf"^- \*\*{re.escape(label)}:\*\*[^\n]*(?:\n|$)", "", head, count=1, flags=re.M
+        )
+    return head + tail
+
+
 def department_histogram_line(departments: dict[str, int], limit: int = 12) -> str:
     items = sorted(departments.items(), key=lambda kv: (-kv[1], kv[0]))[:limit]
     if not items:
@@ -190,6 +213,9 @@ def upsert_inventory(path: Path, summary: dict[str, Any]) -> None:
             )
         else:
             text = text.rstrip() + "\n\n## Pipeline summary\n\n" + block
+        # The skeleton's header placeholders were just updated, but the block
+        # above is now their canonical home: drop the duplicates (#63).
+        text = _strip_summary_fields_from_header(text)
         path.write_text(text if text.endswith("\n") else text + "\n")
     else:
         name = summary.get("company") or "company"

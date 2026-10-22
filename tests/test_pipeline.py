@@ -4448,13 +4448,17 @@ class InventoryPipelineTests(unittest.TestCase):
     """#33: the INVENTORY header is owned by the helpers, not by the model."""
 
     @staticmethod
-    def _header(text: str) -> dict[str, str]:
+    def _fields(text: str) -> dict[str, str]:
+        """Every `- **Label:** value` line in the file, which lists each once.
+
+        Listings/Pagination live in the summary block, not the header (#63),
+        so the helper-owned state is read from the whole document.
+        """
         import re
 
-        head = text.split(MARKER_START)[0]
         return {
             label.strip(): value.strip()
-            for label, value in re.findall(r"^- \*\*([^*]+):\*\* (.*)$", head, re.M)
+            for label, value in re.findall(r"^- \*\*([^*]+):\*\* (.*)$", text, re.M)
         }
 
     def _stage(self, tmp: Path, name: str = "Example Co", slug: str = "example-co"):
@@ -4498,7 +4502,11 @@ class InventoryPipelineTests(unittest.TestCase):
         listings = json.loads((triage / "index" / "listings.json").read_text())
         pagination = json.loads((triage / "index" / "pagination.json").read_text())
         inventory = (triage / "INVENTORY.md").read_text()
-        header = self._header(inventory)
+        header = self._fields(inventory)
+        # #63: Listings/Pagination are canonical in the summary block only.
+        head = inventory.split(MARKER_START)[0]
+        self.assertNotIn("Listings", head)
+        self.assertNotIn("Pagination", head)
 
         self.assertEqual(int(header["Listings"]), len(listings))
         self.assertEqual(header["Listings"], "2")
@@ -4538,7 +4546,11 @@ class InventoryPipelineTests(unittest.TestCase):
             triage = triage_for(label)
             write_pagination(triage, result, company=label.title())
             pag = json.loads((triage / "index" / "pagination.json").read_text())
-            header = self._header((triage / "INVENTORY.md").read_text())
+            text = (triage / "INVENTORY.md").read_text()
+            header = self._fields(text)
+            head = text.split(MARKER_START)[0]
+            self.assertNotIn("Listings", head)
+            self.assertNotIn("Pagination", head)
             self.assertEqual(pag["status"], header["Status"])
             self.assertEqual(int(header["Listings"]),
                              len(json.loads((triage / "index" / "listings.json").read_text())))
@@ -4656,7 +4668,7 @@ class InventoryPipelineTests(unittest.TestCase):
         self.assertEqual(pag["status"], "captured")
         self.assertFalse(pag["complete"])
         inventory = (triage / "INVENTORY.md").read_text()
-        header = self._header(inventory)
+        header = self._fields(inventory)
         self.assertEqual(header["Status"], "captured")
         # A fresh file carries Pagination once, in the summary block (#55).
         self.assertEqual(inventory.count("- **Pagination:**"), 1)
@@ -4693,7 +4705,7 @@ class InventoryPipelineTests(unittest.TestCase):
         self.assertEqual(pag["status"], "blocked")
         # Nothing captured is not an empty board: ingest must not expire it.
         self.assertEqual(json.loads((triage / "index" / "listings.json").read_text()), [])
-        header = self._header((triage / "INVENTORY.md").read_text())
+        header = self._fields((triage / "INVENTORY.md").read_text())
         self.assertEqual(header["Status"], "blocked")
         logs = list((triage / "fetch-log").glob("*.json"))
         self.assertEqual(len(logs), 1)
@@ -4778,23 +4790,76 @@ class InventoryOutputTests(unittest.TestCase):
 
         upsert_inventory(path, self.SUMMARY)
         first = path.read_text()
-        self.assertIn("- **Slug:** example-co", first)
-        self.assertIn("- **Careers URL:** https://example.com/careers", first)
-        self.assertNotIn("(fill)", first)
         head = first.split("## Pipeline summary")[0]
-        self.assertNotIn("Listings:** 0", head)
-        self.assertEqual(self._counts(head, ("Listings", "Status")),
-                         {"Listings": 1, "Status": 1})
+        self.assertIn("- **Slug:** example-co", head)
+        self.assertIn("- **Careers URL:** https://example.com/careers", head)
+        self.assertIn("- **Status:** complete", head)
+        self.assertIn("- **Caveats:**", head)
+        self.assertNotIn("(fill)", first)
+        # #63: the summary block owns Listings/Pagination, so the header lines
+        # the skeleton carried must be gone — one label per file, not per head.
+        self.assertEqual(
+            self._counts(first, ("Listings", "Careers URL", "Pagination", "Status",
+                                 "Departments")),
+            {"Listings": 1, "Careers URL": 1, "Pagination": 1, "Status": 1,
+             "Departments": 1},
+        )
+        self.assertIn("- **Listings:** 3", first.split("## Pipeline summary")[1])
 
         # A second write updates the same lines; it does not append copies.
         upsert_inventory(path, {**self.SUMMARY, "nListings": 7, "nMatches": 4})
         second = path.read_text()
         self.assertEqual(second.count("## Pipeline summary"), 1)
         head = second.split("## Pipeline summary")[0]
-        self.assertEqual(self._counts(head, ("Listings", "Status")),
-                         {"Listings": 1, "Status": 1})
-        self.assertIn("- **Listings:** 7", head)
+        self.assertNotIn("Listings", head)
+        self.assertEqual(
+            self._counts(second, ("Listings", "Careers URL", "Pagination", "Status",
+                                  "Departments")),
+            {"Listings": 1, "Careers URL": 1, "Pagination": 1, "Status": 1,
+             "Departments": 1},
+        )
+        self.assertIn("- **Listings:** 7", second.split("## Pipeline summary")[1])
         self.assertIn("- **Matches:** 4 of 7 match prefs", second)
+
+    def test_stage_company_skeleton_heals_to_one_label_per_file(self):
+        """#63: the real stage-company.sh template must not duplicate labels."""
+        tmp = Path(tempfile.mkdtemp(prefix="nj-skeleton-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        path = tmp / "INVENTORY.md"
+        # Copied verbatim from skills/careers-discover/helpers/stage-company.sh.
+        path.write_text(
+            "# Careers triage — Anthropic\n\n"
+            "- **Slug:** anthropic\n"
+            "- **Date:** 2026-10-22\n"
+            "- **Careers URL:** (fill)\n"
+            "- **Listings:** 0\n"
+            "- **Pagination:** (pending)\n"
+            "- **Status:** (pending)\n"
+            "- **Caveats:**\n"
+            "- **Next steps:** Review listings.json, then run jobs-ingest if OK.\n"
+        )
+
+        upsert_inventory(path, {**self.SUMMARY, "company": "Anthropic",
+                                "nListings": 3, "nMatches": 1})
+        first = path.read_text()
+        labels = ("Listings", "Careers URL", "Pagination", "Status", "Departments")
+        self.assertEqual(self._counts(first, labels),
+                         {label: 1 for label in labels})
+
+        upsert_inventory(path, {**self.SUMMARY, "company": "Anthropic",
+                                "nListings": 7, "nMatches": 1})
+        second = path.read_text()
+        self.assertEqual(second.count("## Pipeline summary"), 1)
+        self.assertEqual(self._counts(second, labels),
+                         {label: 1 for label in labels})
+        self.assertNotIn("(fill)", second)
+        self.assertNotIn("(pending)", second)
+        self.assertIn("- **Listings:** 7", second.split("## Pipeline summary")[1])
+        self.assertIn("- **Careers URL:** https://example.com/careers", second)
+        self.assertIn("- **Status:** complete", second)
+        # Prose the skeleton added outside the header survives the heal.
+        self.assertIn("- **Date:** 2026-10-22", second)
+        self.assertIn("- **Next steps:** Review listings.json", second)
 
     def test_unknown_departments_say_so(self):
         self.assertEqual(
