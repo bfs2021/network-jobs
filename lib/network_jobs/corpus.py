@@ -10,6 +10,7 @@ from typing import Any
 
 from .embeddings import maybe_update_embeddings
 from .fingerprint import fingerprint
+from .inventory import NO_EXPIRY_STATUSES
 from .locations import location_buckets_for, primary_location_bucket
 from .matches import MatchesFormatError, normalize_matches
 from .text import normalize_company, slugify
@@ -87,6 +88,7 @@ def merge_jobs(
     *,
     expire_company: str | None = None,
     pagination_complete: bool = False,
+    pagination_status: str | None = None,
     expected_total: int | None = None,
     force_expire: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -98,6 +100,12 @@ def merge_jobs(
     A matches-only batch over a bigger board skips expiry loudly instead of
     silently closing live roles (#16) — pass force_expire only when you know
     the batch is the full board despite a smaller count.
+
+    `pagination_status` is the crawl headline from `index/pagination.json`.
+    `blocked` (unreadable board) and `captured` (user-saved page) can never
+    expire, even with `pagination_complete` set — the flag is model-supplied,
+    the status is written by the helper (#39). `empty` is a clean parsed board
+    with zero roles and may expire.
 
     Fingerprint drift detection (#25): if an incoming job's externalId matches
     an existing job under a different fingerprint, we merge into the existing
@@ -154,7 +162,15 @@ def merge_jobs(
             by_ext[str(ext)] = fp
 
     info: dict[str, Any] = {"expired": 0, "expirySkipped": False, "expiryReason": "", "driftWarnings": drift_warnings}
-    if expire_company and pagination_complete:
+    if expire_company and pagination_status in NO_EXPIRY_STATUSES:
+        # Never expire from an unreadable board or a user capture — not even
+        # with force_expire, because those rows are not evidence a role closed.
+        info["expirySkipped"] = True
+        info["expiryReason"] = (
+            f"pagination status={pagination_status} is not evidence that roles "
+            "closed (blocked = unreadable board, captured = user-saved page): "
+            "expiry skipped")
+    elif expire_company and pagination_complete:
         if (expected_total is not None and not force_expire
                 and len(seen) < expected_total):
             info["expirySkipped"] = True
@@ -260,6 +276,7 @@ def rebuild(
     *,
     expire_company: str | None = None,
     pagination_complete: bool = False,
+    pagination_status: str | None = None,
     expected_total: int | None = None,
     force_expire: bool = False,
 ) -> dict[str, Any]:
@@ -270,18 +287,23 @@ def rebuild(
         incoming,
         expire_company=expire_company,
         pagination_complete=pagination_complete,
+        pagination_status=pagination_status,
         expected_total=expected_total,
         force_expire=force_expire,
     )
     summary = write_shards(corpus, jobs)
     summary["incoming"] = len(incoming)
-    summary["expired"] = bool(expire_company) and pagination_complete and not merge_info["expirySkipped"]
+    summary["expired"] = (
+        bool(expire_company) and pagination_complete
+        and not merge_info["expirySkipped"]
+    )
     summary["expiredCount"] = merge_info["expired"]
     summary["expirySkipped"] = merge_info["expirySkipped"]
     summary["expiryReason"] = merge_info["expiryReason"]
     summary["driftWarnings"] = merge_info.get("driftWarnings", [])
     summary["expireCompany"] = expire_company or ""
     summary["paginationComplete"] = pagination_complete
+    summary["paginationStatus"] = pagination_status or ""
     # Semantic cache: embed only new/changed jobs; no-op when no provider.
     summary["embeddings"] = maybe_update_embeddings(corpus, jobs)
     return summary

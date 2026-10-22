@@ -63,21 +63,24 @@ python3 "$SUITE/skills/jobs-ingest/helpers/classify-listings.py" \
    Fill `companyDomain` from the graph when known. Keep `salary` / `postedAt` only if present in triage.
 5. **Merge** into corpus via helper (required):
    - Write the **new/updated jobs only** to a working file (e.g. `$DATA/corpus/.work/batch.json`)
-   - Read `index/pagination.json` (or INVENTORY). Pass `--pagination-complete` **only** when `complete` is true.
+   - Read `index/pagination.json` (or INVENTORY). Pass `--pagination-complete` **only** when `complete` is true **and** `status` is neither `blocked` nor `captured`, and **never** for a user-capture run (`status: captured`) — a blocked board captured zero rows because it could not be read, and a capture is one saved page, not the board; neither is evidence that roles closed. `status: truncated` behaves like `complete: false`. `status: empty` is a clean, parsed board listing zero roles — that one **may** expire (`complete` is true, so `--expect-count 0` works).
+   - Pass `--pagination-status "$(jq -r '.status' "$TRIAGE/index/pagination.json")"` with every rebuild: the helper refuses expiry on `blocked` / `captured` even if `--pagination-complete` slipped through.
    - Always pass `--expect-count` with the full board size (`index/listings.json` length). A matches-only batch over a bigger board then **skips expiry loudly** instead of closing live roles; only `--force-expire` overrides (use when you know the board genuinely shrank).
    - Run [`helpers/rebuild-corpus.sh`](helpers/rebuild-corpus.sh) on that file:
 
 ```bash
 N_LISTINGS=$(jq 'length' "$TRIAGE/index/listings.json")
+STATUS=$(jq -r '.status' "$TRIAGE/index/pagination.json")
 "$SUITE/skills/jobs-ingest/helpers/rebuild-corpus.sh" "$DATA/corpus/.work/batch.json" \
-  --expire-company "$SLUG" --pagination-complete --expect-count "$N_LISTINGS"
-# or, when truncated / incomplete:
+  --expire-company "$SLUG" --pagination-complete --expect-count "$N_LISTINGS" \
+  --pagination-status "$STATUS"
+# or, when truncated / incomplete / blocked / captured:
 "$SUITE/skills/jobs-ingest/helpers/rebuild-corpus.sh" "$DATA/corpus/.work/batch.json" \
-  --expire-company "$SLUG" --pagination-incomplete
+  --expire-company "$SLUG" --pagination-incomplete --pagination-status "$STATUS"
 ```
 
    - The helper **merges by fingerprint** with existing `corpus/jobs-all.json` (incoming wins, `firstSeen` kept), rewrites shards + manifest, and **deletes stale shard files**
-   - Unseen jobs for that company are marked `closed` **only** when `--pagination-complete` is set **and** the batch covers the expected board size. Never expire on incomplete crawls or filtered batches.
+   - Unseen jobs for that company are marked `closed` **only** when `--pagination-complete` is set **and** the batch covers the expected board size **and** `--pagination-status` is not `blocked`/`captured`. Never expire on incomplete crawls, user-capture runs, or filtered batches. `status: empty` may expire.
 6. **Report** incoming count, total after merge, removed stale shards; show `manifest.totalJobs` and `lastUpdated`
 7. Leave triage dirs in place (do not delete unless user asks)
 
@@ -107,16 +110,18 @@ python3 "$SUITE/skills/jobs-ingest/helpers/classify-listings.py" \
   --input "$DATA/corpus/.work/raw.json" --out "$DATA/corpus/.work/batch.json" --company "$NAME"
 # After classifying (and optionally LLM-fixing needsLlm rows):
 N_LISTINGS=$(jq 'length' "$TRIAGE/index/listings.json")
+STATUS=$(jq -r '.status' "$TRIAGE/index/pagination.json")
 "$SUITE/skills/jobs-ingest/helpers/rebuild-corpus.sh" "$DATA/corpus/.work/batch.json" \
-  --expire-company "$SLUG" --pagination-complete --expect-count "$N_LISTINGS"   # only if pagination.complete
+  --expire-company "$SLUG" --pagination-complete --expect-count "$N_LISTINGS" \
+  --pagination-status "$STATUS"   # only if pagination.complete and status is not blocked/captured
 ```
 
-The classify helper is deterministic. Only send `needsLlm` titles to the model. Rebuild merges by fingerprint, shards by category/location/seniority (hybrid jobs land in every `locationBuckets` shard), and closes unseen jobs for `--expire-company` **only** when `--pagination-complete` is set.
+The classify helper is deterministic. Only send `needsLlm` titles to the model. Rebuild merges by fingerprint, shards by category/location/seniority (hybrid jobs land in every `locationBuckets` shard), and closes unseen jobs for `--expire-company` **only** when `--pagination-complete` is set and the status is not `blocked`/`captured`.
 
 ## Helpers
 
 - [`helpers/classify-listings.py`](helpers/classify-listings.py) — title/department → category, track, senioritySignals, locationBuckets
-- [`helpers/rebuild-corpus.sh`](helpers/rebuild-corpus.sh) — fingerprint merge + shards; expire only if pagination.complete
+- [`helpers/rebuild-corpus.sh`](helpers/rebuild-corpus.sh) — fingerprint merge + shards; expire only if pagination.complete and status is not `blocked`/`captured`
 
 ## Related
 

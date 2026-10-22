@@ -13,7 +13,7 @@ from typing import Any
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
-from .inventory import upsert_inventory, write_summary_json
+from .inventory import careers_url_from_listings, crawl_status, upsert_inventory, write_summary_json
 from .dates import normalize_date_iso
 from .fingerprint import fingerprint
 from .salary import parse_salary
@@ -133,6 +133,30 @@ def extract_job_list(payload: Any) -> list[Any]:
             if nested:
                 return nested
     return []
+
+
+def parsed_empty_board(payload: Any) -> bool:
+    """True when a parsed payload carries a recognizable job list with no rows.
+
+    A clean HTTP 200 with `jobs: []` means the company closed every role — a
+    real answer, not a failed read. An unparseable body, a missing list key or
+    a payload we could not normalize stays "nothing parseable came back" and
+    must not be mistaken for an empty board (#39).
+    """
+    if isinstance(payload, list):
+        return not payload
+    if not isinstance(payload, dict):
+        return False
+    for key in LIST_KEYS:
+        value = payload.get(key)
+        if isinstance(value, list):
+            return not value
+        if isinstance(value, dict) and parsed_empty_board(value):
+            return True
+    for value in payload.values():
+        if isinstance(value, dict) and parsed_empty_board(value):
+            return True
+    return False
 
 
 def _location_from(raw: Any) -> tuple[str, list[Any]]:
@@ -423,12 +447,20 @@ def paginate(
     fetch=None,
     source_url: str = "",
     company: str = "",
+    capture: bool = False,
 ) -> dict[str, Any]:
+    """Follow pagination into a result dict.
+
+    `capture=True` marks a `paginate --input` run: the rows came from a single
+    page a human saved, so the run can never prove the board is complete. It
+    always records `complete: false` / `status: "captured"` (#39).
+    """
     fetch = fetch or fetch_json
     listings: list[dict[str, Any]] = []
     pages = 0
     truncated = False
     complete = True
+    empty_board = False
     scheme = "none"
     current = url
     offset = 0
@@ -468,6 +500,8 @@ def paginate(
             break
 
         raw_jobs = extract_job_list(payload)
+        if not raw_jobs and parsed_empty_board(payload):
+            empty_board = True
         page_listings = []
         for raw in raw_jobs:
             item = normalize_listing(raw, source_url=source_url or (current or ""))
@@ -514,16 +548,72 @@ def paginate(
         current = next_url
         payload = None
 
+    # Crawl state (#34/#39). `status` is additive: `complete`/`truncated` keep
+    # their old meaning and stay the expiry rule; `status` is the readable,
+    # machine-checked headline.
+    #   complete  — clean crawl, rows captured
+    #   truncated — page/listing cap hit with rows captured
+    #   empty     — clean 200 with a parsed, empty job list: every role closed
+    #   blocked   — nothing parseable came back (unreadable body, no list key)
+    #   captured  — `paginate --input`: a saved page, never the whole board
+    pagination_complete = complete and not truncated
+    if capture:
+        pagination_complete = False
+        status = "captured" if listings else "blocked"
+    elif not listings and empty_board:
+        status = "empty"
+    elif not listings:
+        status = "blocked"
+        pagination_complete = False
+    elif truncated:
+        status = "truncated"
+    else:
+        status = "complete"
     return {
         "listings": listings,
+        "sourceUrl": source_url,
         "pagination": {
             "pages": pages,
-            "complete": complete and not truncated,
+            "complete": pagination_complete,
             "truncated": truncated,
             "scheme": scheme,
             "maxPages": max_pages,
+            "status": status,
         },
         "fetchLog": fetch_log,
+    }
+
+
+def blocked_result(url: str, error: str, max_pages: int = DEFAULT_MAX_PAGES) -> dict[str, Any]:
+    """A `blocked` crawl result for a fetch that raised.
+
+    The `paginate` CLI records this instead of crashing, so a dead URL still
+    leaves a readable `index/pagination.json` (status `blocked`, complete
+    false) and a fetch-log entry — never an empty board that ingest could
+    expire. `paginate()` itself still raises, so callers like `refresh` keep
+    their own per-company error reporting.
+    """
+    return {
+        "listings": [],
+        "sourceUrl": url,
+        "pagination": {
+            "pages": 0,
+            "complete": False,
+            "truncated": False,
+            "scheme": "none",
+            "maxPages": max_pages,
+            "status": "blocked",
+        },
+        "fetchLog": [{
+            "timestamp": _now(),
+            "method": "curl",
+            "url": url,
+            "status": 0,
+            "bytes": 0,
+            "disposition": "error",
+            "error": error,
+            "page": 1,
+        }],
     }
 
 
@@ -535,6 +625,9 @@ def write_pagination(triage_dir: Path, result: dict[str, Any], company: str = ""
         json.dumps(result["listings"], indent=2, ensure_ascii=False) + "\n"
     )
     pag = dict(result["pagination"])
+    pag.setdefault(
+        "status", crawl_status(pag, len(result["listings"]))
+    )
     (index / "pagination.json").write_text(json.dumps(pag, indent=2) + "\n")
     log_dir = triage / "fetch-log"
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -546,6 +639,11 @@ def write_pagination(triage_dir: Path, result: dict[str, Any], company: str = ""
         "nListings": len(result["listings"]),
         "pagination": pag,
     }
+    careers_url = careers_url_from_listings(
+        result["listings"], str(result.get("sourceUrl") or "")
+    )
+    if careers_url:
+        summary["careersUrl"] = careers_url
     existing = {}
     summary_path = index / "summary.json"
     if summary_path.is_file():

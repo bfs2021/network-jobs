@@ -72,7 +72,7 @@ SUITE="${NETWORK_JOBS_SUITE:-${SUITE:-}}"
    2. Web search: `"{company}" careers` / `"{company}" jobs`
    3. Company homepage → follow Careers/Jobs nav
    4. If blocked or SPA-only → `agent-browser` (snapshot → refs)
-   5. If still blocked → ask **one question**: save the page and point me at the file, share a CDP endpoint, or stop here (recommended when the site hard-blocks: stop rather than invent openings).
+   5. If still blocked → the concrete user-capture handoff in [§3](#3-user-capture-the-default-for-gated-boards): exact URL, what to save, `$TRIAGE/captures/`, then `paginate --input`. Recommend stopping rather than inventing openings when the site hard-blocks.
 
 4. **Extract listings**
    - Prefer structured JSON if the page or network tab exposes a jobs API
@@ -83,16 +83,19 @@ python3 "$SUITE/skills/careers-discover/helpers/paginate-listings.py" \
   --url "$JOBS_JSON_URL" --triage-dir "$TRIAGE" --company "$NAME" --max-pages 15
 ```
 
-     Follows `page` / `cursor` / `offset` / `links.next` generically. Writes `index/listings.json`, `index/pagination.json` (`pages`, `complete`, `truncated`), and one fetch-log metadata file **per page**. Cap `maxPages`.
-   - Else parse visible listing cards / table rows (still write fetch-log before summarizing)
+     Follows `page` / `cursor` / `offset` / `links.next` generically. Writes `index/listings.json`, `index/pagination.json` (`pages`, `complete`, `truncated`, `status`), and one fetch-log metadata file **per page**. Cap `maxPages`.
+
+     `status` is `complete` (clean crawl), `truncated` (page/listing cap hit), `empty` (clean, parsed board with zero roles — every role closed), `blocked` (the fetch failed or nothing parseable came back — **not** “no openings”) or `captured` (a `paginate --input` run over a user-saved page — never the whole board). `complete` / `truncated` stay the source of truth for expiry and are unchanged; `status` is the readable headline. `--input` always records `complete: false` / `status: captured`.
+   - Else parse visible listing cards / table rows (still write fetch-log before summarizing). If the board is gated and you cannot read it, stop here and use the user-capture handoff in [§3](#3-user-capture-the-default-for-gated-boards) — do not stage an empty board as success.
    - For each role capture: `title`, `url` (required), `location` and `locations[]` when shown, `department`, `externalId` if the JSON has an id, `salary` / `postedAt` only if shown, `sourceUrl`
-   - Never invent ATS-specific parsers. If the helper truncates, set `complete: false` and say so in INVENTORY.
+   - Never invent ATS-specific parsers. If the helper truncates, `status` is `truncated`; if nothing parseable came back, `status` is `blocked`; if the board parses cleanly and lists zero roles, `status` is `empty`. Never pad rows from partial cards.
 
 5. **Stage**
 
 ```text
 $DATA/triage/careers-<slug>-<YYYY-MM-DD>/
 ├── INVENTORY.md
+├── captures/                  # user-supplied JSON/HTML for a gated board
 ├── index/listings.json
 ├── index/matches.json
 └── fetch-log/<timestamp>-<label>.json
@@ -130,23 +133,6 @@ This writes `index/matches.json` and patches INVENTORY with **N of M match prefs
 
 7b. **Fetch descriptions for matches (required helper)**
 
-Titles alone cap everything downstream. Fetch bodies for the shortlist —
-never the whole board:
-
-```bash
-python3 "$SUITE/skills/careers-discover/helpers/fetch-descriptions.py" \
-  --triage-dir "$TRIAGE" --company "$NAME"
-```
-
-Fills `description` (truncated plain text) plus `descriptionFetchedAt` /
-`descriptionSource`, and fills `department` from the ATS payload when the
-row lacks one. Fetch failures never fail the run — undescribed rows score
-exactly as before. Bodies ride through ingest automatically. `matches.json`
-keeps its object shape (`jobs[]` + summary keys); a re-run of `match-prefs`
-restores these bodies (`restoredDescriptions`).
-
-7b. **Fetch descriptions for matches (required helper)**
-
 Titles alone cap everything downstream (scoring, fit brief, intros). Fetch
 bodies for the shortlist — never the whole board:
 
@@ -155,11 +141,13 @@ python3 "$SUITE/skills/careers-discover/helpers/fetch-descriptions.py" \
   --triage-dir "$TRIAGE" --company "$NAME"
 ```
 
-This fills `description` (truncated plain text, ~10k chars) plus
-`descriptionFetchedAt`/`descriptionSource` on matches.json rows, and fills
-`department` from the ATS payload when the row lacks one. Fetch failures
-never fail the run — undescribed rows score exactly as before. Bodies flow
-through ingest automatically (`dict` copies end to end). The file stays the
+`--company` is optional and only labels the run's JSON summary (same flag as
+`match-prefs` / `review-matches`); the source file is still `matches.json`
+unless you pass `--all`. This fills `description` (truncated plain text, ~10k
+chars) plus `descriptionFetchedAt`/`descriptionSource` on matches.json rows,
+and fills `department` from the ATS payload when the row lacks one. Fetch
+failures never fail the run — undescribed rows score exactly as before. Bodies
+flow through ingest automatically (`dict` copies end to end). The file stays the
 documented object (`jobs[]` + summary), and re-running `match-prefs`
 restores the bodies instead of clobbering them.
 
@@ -178,16 +166,24 @@ before/after counts.
 
 8. **INVENTORY.md must include**
    - Company name + slug
-   - Careers URL(s) used
+   - The header fields **`Listings`**, **`Careers URL`**, **`Pagination`**, **`Status`** — `paginate`, `match-prefs` and `crawl-state` patch them from `index/*.json` on every write, so do not hand-maintain the numbers. If no helper ran (a manual card extract), fill them yourself from the files you wrote.
    - Listing count **and** “N of M match prefs”
    - Department histogram (from the helper)
-   - Pagination `{pages, complete, truncated}` and crawl hash / skip-if-unchanged
+   - Pagination `{pages, complete, truncated, status}` and crawl hash / skip-if-unchanged
    - Connections at company (from graph) + sample people
    - Caveats (bot wall, partial pagination, uncertain domain)
    - Next steps (“ingest matches?” / “ingest all” / department slice)
 
+   `Status` must agree with `index/pagination.json`: `complete` (clean crawl),
+   `truncated` (cap hit — say which), `empty` (clean board, zero roles — say so
+   plainly), `blocked` (nothing parseable came back — say which URL was
+   unreachable and what the user can do) or `captured` (rows from a user save —
+   say “user capture, not a full crawl”). A `blocked` board is **not** a company
+   with no openings; never present it as one in chat or in the header.
+
 9. **Hand off (hard stop)**
    - Point at each triage dir. Quote the helper’s `showing` line (e.g. `14 of 120 match prefs`) — do not paste the full listings array.
+   - For a `blocked`, `truncated` or `captured` dir, lead with the state (“could not read this board — 0 captured”, “page cap hit — 10 of ~952”, “user capture — one page of ~952”), then give the one-line capture handoff (URL to open, file to save, path to drop it). Never quote a partial count as if it were the whole board.
    - Offer `review-matches` to walk families before ingest (“18 matched across 4 families — want to veto any?”). Ask it as **one multi-select** over families, with match counts in the labels and your recommended vetoes marked, not a prose list.
    - If the run surfaced something that looks like a **suite defect** rather than a site quirk (malformed listings, dedup collapse, zero-yield pagination on a board that should list), say so and offer to file it: `network-jobs report --dry-run` first, show the bundle, and only file after explicit confirmation (one question: file it / show me the bundle first).
    - Then ask **one question**: run `jobs-ingest` on **matches** (recommended — the board was already scored against prefs), **all** listings, or a department slice. Put the counts in the labels (`matches — 14`, `all — 120`, `Engineering — 31`).
@@ -215,22 +211,64 @@ Use when tier 1 yields:
 - Pagination or filters that require click / “Load more” / infinite scroll
 - Client-side routing where listing URLs aren’t discoverable from static HTML
 
-Workflow: open URL → snapshot → interact by refs → re-snapshot after DOM changes → write fetch-log before summarizing. Cap **5** “Load more” / next-page clicks; if you stop early, pagination.complete is false.
+Workflow: open URL → snapshot → interact by refs → re-snapshot after DOM changes → write fetch-log before summarizing.
 
-### 3. User capture / CDP
+**Budget per board: 2 endpoint/route probes and 5 browser interactions, total.**
+Count an API/XHR probe (including a replay attempt) and a route you haven't tried as a probe; count every open/snapshot/click/scroll as an interaction, with “Load more” / next-page clicks capped at 5. When the budget is spent, stop interacting: record what was captured, let the helper stamp `status: truncated` (rows captured but incomplete) or `blocked` (nothing parseable), write the fetch-log, and escalate to tier 3. Do not keep improvising on a hard wall, and do not pad rows from the cards you managed to see.
 
-Use when tier 2 still can’t see listings (hard login, hard captcha, geo block). Ask **one question** — save/share the page (recommended), share a CDP endpoint, or stop — then stage from that capture. Do not invent openings.
+Site-family recipes in [`references/`](references/) may document a known endpoint and override the probe budget for that board only — say which recipe you used in the fetch-log `notes`.
+
+### 3. User capture (the default for gated boards)
+
+Use when tier 2 still can’t see listings (signed GraphQL, authenticated SPA, hard login, captcha, geo block). This is a concrete handoff, not a vague ask:
+
+1. Ask **one question** — save a capture (recommended), share a CDP endpoint, or stop. Recommend capture because `paginate --input` already ingests it.
+2. Tell the user the **exact URL to open** (the careers/search URL, filters and query included) and **what to save**:
+   - best: the jobs JSON/API response — DevTools → Network → the request that returned the postings → “Save response” as `.json`
+   - acceptable: the fully rendered page — browser “Save page as” → `.html`
+3. Tell them **where to drop it**: `$TRIAGE/captures/<label>.json` (or `.html`). Create `captures/` first if needed.
+4. Ingest a JSON capture directly:
+
+```bash
+python3 "$SUITE/skills/careers-discover/helpers/paginate-listings.py" \
+  --triage-dir "$TRIAGE" --input "$TRIAGE/captures/<label>.json" --company "$NAME"
+```
+
+   An HTML capture is not parsed by the helper: read the rendered cards yourself, write only the rows that are actually on the page into a JSON array (`title`, `url`, `location`, optional `department`) under `captures/`, then run the same `--input` command. **Never invent listings**, and never scale a partial card count (e.g. “10 of 952”) into rows.
+5. Write the fetch-log entry **before** summarizing — `method` and `disposition` are both `user-capture`:
+
+```bash
+mkdir -p "$TRIAGE/fetch-log"
+cat > "$TRIAGE/fetch-log/$(date -u +%Y%m%dT%H%M%SZ)-user-capture.json" <<JSON
+{
+  "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "method": "user-capture",
+  "url": "<careers URL the user opened>",
+  "status": null,
+  "capturePath": "$TRIAGE/captures/<label>.json",
+  "disposition": "user-capture",
+  "notes": "JS/GraphQL-gated board; user saved the response"
+}
+JSON
+```
+
+   `paginate --input` is a **user capture**, and records it: `complete: false` and `status: "captured"` in `index/pagination.json` (even when every row parsed). That is machine-readable, so ingest cannot expire on a capture — a one-page save of a ~952-role board will never close the other ~950 rows. Do not flip those fields by hand and never present the count as the whole board.
+6. If the user declines or the capture yields nothing, keep `status: blocked` in `pagination.json` and INVENTORY and say plainly that the board could not be read. That is a valid result; a fabricated shortlist is not.
 
 ### Decision rule
 
 ```text
 try WebFetch/curl
-  → real listings?        stage them
-  → empty / JS / challenge?  agent-browser once
-  → still blocked?           ask one question (save/share capture, or stop)
+  → real listings?            stage them
+  → empty / JS / challenge?   agent-browser (≤2 endpoint probes, ≤5 interactions)
+  → still blocked?            mark status blocked|truncated, ask one question
+                              → user capture → paginate --input captures/<file>
+                                 (records status captured, complete false)
+                              → CDP → stage from the session, then same helpers
+                              → stop → leave status blocked, say why
 ```
 
-Never start with agent-browser for a simple static page. Never keep retrying browser against a hard auth wall.
+Never start with agent-browser for a simple static page. Never keep retrying browser against a hard auth wall, and never report a blocked board as “no openings”. A board that parses cleanly and lists zero roles is `status: empty` — that really is “no openings”, and ingest may expire it.
 
 ## Browser version floor
 
@@ -270,6 +308,7 @@ concluding the tool is broken, and never retry the same wrong invocation.
 - [`helpers/paginate-listings.py`](helpers/paginate-listings.py) — page/cursor/offset into `listings.json` + `pagination.json`
 - [`helpers/crawl-state.py`](helpers/crawl-state.py) — listing-set hash vs lastCrawl; `--stamp` after a successful extract
 - [`helpers/match-prefs.py`](helpers/match-prefs.py) — score listings vs `preferences.json` → `index/matches.json`
+- [`helpers/fetch-descriptions.py`](helpers/fetch-descriptions.py) — fill JD bodies for matches (`--company` optional)
 - [`helpers/review-matches.py`](helpers/review-matches.py) — cluster shortlist into families, explain leaks, apply vetoes
 
 ## Related
