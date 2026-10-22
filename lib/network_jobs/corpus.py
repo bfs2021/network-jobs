@@ -82,6 +82,21 @@ def _company_key(job: dict[str, Any]) -> str:
     return normalize_company(str(job.get("company") or ""))
 
 
+def _matches_expire_company(job: dict[str, Any], expire_company: str) -> bool:
+    target = normalize_company(expire_company) or slugify(expire_company)
+    key = _company_key(job)
+    slug = slugify(key)
+    return key == target or slug == slugify(target) or slug == target
+
+
+def _open_count_for_company(jobs: list[dict[str, Any]], expire_company: str) -> int:
+    return sum(
+        1 for job in jobs
+        if str(job.get("status") or "open") != "closed"
+        and _matches_expire_company(job, expire_company)
+    )
+
+
 def merge_jobs(
     existing: list[dict[str, Any]],
     incoming: list[dict[str, Any]],
@@ -104,8 +119,12 @@ def merge_jobs(
     `pagination_status` is the crawl headline from `index/pagination.json`.
     `blocked` (unreadable board) and `captured` (user-saved page) can never
     expire, even with `pagination_complete` set — the flag is model-supplied,
-    the status is written by the helper (#39). `empty` is a clean parsed board
-    with zero roles and may expire.
+    the status is written by the helper (#39). A sudden drop to zero incoming
+    rows for that company, with N>0 prior open roles, is skipped unless
+    `force_expire` is set — regardless of status (omitted, the jq string
+    "null", or `empty`). A filtered or region-limited crawl URL can look
+    empty and would otherwise wipe the company. A company that already had
+    zero open roles may record empty.
 
     Fingerprint drift detection (#25): if an incoming job's externalId matches
     an existing job under a different fingerprint, we merge into the existing
@@ -171,7 +190,22 @@ def merge_jobs(
             "closed (blocked = unreadable board, captured = user-saved page): "
             "expiry skipped")
     elif expire_company and pagination_complete:
-        if (expected_total is not None and not force_expire
+        prior_open = _open_count_for_company(existing, expire_company)
+        incoming_for_company = any(
+            _matches_expire_company(j, expire_company) for j in incoming
+        )
+        # Key on the data, not the status label: an omitted status or jq's
+        # "null" (older pagination.json) used to fall through and expire
+        # every prior open role. Check before the expect-count subset rule
+        # because expected_total=0 makes len(seen) < expected_total false.
+        if not force_expire and prior_open > 0 and not incoming_for_company:
+            info["expirySkipped"] = True
+            info["expiryReason"] = (
+                f"incoming 0 rows for company but {prior_open} open "
+                f"role{'s' if prior_open != 1 else ''} already in the corpus: "
+                "expiry skipped (a filtered or region-limited URL can look "
+                "empty; pass --force-expire if every role really closed)")
+        elif (expected_total is not None and not force_expire
                 and len(seen) < expected_total):
             info["expirySkipped"] = True
             info["expiryReason"] = (
@@ -179,13 +213,10 @@ def merge_jobs(
                 f"{expected_total}: treating batch as filtered; expiry skipped "
                 "(pass force_expire to override)")
         else:
-            target = normalize_company(expire_company) or slugify(expire_company)
             for fp, job in list(by_fp.items()):
                 if fp in seen:
                     continue
-                key = _company_key(job)
-                slug = slugify(key)
-                if key != target and slug != slugify(target) and slug != target:
+                if not _matches_expire_company(job, expire_company):
                     continue
                 if str(job.get("status") or "open") == "closed":
                     continue
