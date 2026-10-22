@@ -30,6 +30,21 @@
   installs whose directory is on `PATH` keep the bare `network-jobs`.
 
 ### Fixed
+- `fetch-descriptions` no longer loses bodies to a throttled pass, and says why
+  a page failed (#64). `fetch-failed: HTTPError` became `http-<code>`, so a
+  closed role (404) no longer looks like throttling (429) or a timeout;
+  transient failures — `http-429`, `http-5xx`, and `TimeoutError`/connection
+  resets (including the same causes when `urlopen` wraps them in `URLError`) —
+  get up to two retries, while DNS/TLS failures, other 4xx, non-http URLs and
+  oversized bodies get exactly one request. A 429/503 is obeyed per its
+  `Retry-After` header (seconds or HTTP-date, capped at 30s) instead of the
+  exponential guess, and a host that answered 429 gets a 1s pause before the
+  next job on it. A run-level budget (50 retries, or 5 consecutive retryable
+  failures) stops retrying for the rest of the run and adds
+  `retriesDisabled: true` to the summary, so a board that is down cannot turn
+  222 rows into 666 requests and ~11 minutes of sleep. On the live Anthropic
+  board the first pass fetched 185 of 222 bodies and the immediate rerun
+  fetched the missing 37/37.
 - Staging silently dropped distinct postings whose board reuses one
   `requisition_id` (Greenhouse): `requisition_id` outranked the per-posting
   `id` in both `ID_KEYS` and `fingerprint.ats_id()`, so the fingerprint dedupe

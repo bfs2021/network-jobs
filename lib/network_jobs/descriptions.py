@@ -10,12 +10,15 @@ Failures never fail the run: undescribed jobs score exactly as before.
 from __future__ import annotations
 
 import json
+import math
 import time
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 from .matches import MatchesFormatError, load_matches, write_matches
@@ -24,6 +27,24 @@ from .text import collapse_ws
 MAX_JD_CHARS = 10000
 MAX_DOWNLOAD_BYTES = 2_000_000
 DEFAULT_TIMEOUT = 30
+MAX_RETRY_AFTER = 30.0
+DEFAULT_MAX_TOTAL_RETRIES = 50
+DEFAULT_MAX_CONSECUTIVE_FAILURES = 5
+
+# Failures that clear on their own. `TimeoutError`/`ConnectionError` come from
+# an injected fetch; through `urlopen` the same causes arrive wrapped in a
+# `URLError`, so `_failure_name` unwraps to the reason. A bare `URLError`
+# (DNS, bad certificate), `SSLError`, `ValueError` or `InvalidURL` is a
+# property of the URL or the environment, not of the moment.
+_TRANSIENT_FAILURES = frozenset({
+    "TimeoutError",
+    "ConnectionError",
+    "ConnectionResetError",
+    "ConnectionRefusedError",
+    "ConnectionAbortedError",
+    "BrokenPipeError",
+    "RemoteDisconnected",
+})
 
 _SKIP_TAGS = frozenset({
     "script", "style", "noscript", "nav", "header", "footer",
@@ -144,10 +165,20 @@ def fetch_job_description(
                 content_type = resp.headers.get("Content-Type", "")
                 body = resp.read(MAX_DOWNLOAD_BYTES + 1)
     except HTTPError as exc:
-        # Keep the status so callers can tell 429/5xx (retryable) from 404.
-        return {"error": f"http-{exc.code}"}
+        # Keep the status so callers can tell 429/5xx (retryable) from 404,
+        # and surface Retry-After when the server sent one.
+        error: dict[str, Any] = {"error": f"http-{exc.code}"}
+        retry_after = _retry_after_seconds(getattr(exc, "headers", None))
+        if retry_after is not None:
+            error["retryAfter"] = retry_after
+        try:
+            # HTTPError is also the response object; we never read its body.
+            exc.close()
+        except Exception:
+            pass
+        return error
     except Exception as exc:
-        return {"error": f"fetch-failed: {type(exc).__name__}"}
+        return {"error": f"fetch-failed: {_failure_name(exc)}"}
     if status and status >= 400:
         return {"error": f"http-{status}"}
     if len(body or b"") > MAX_DOWNLOAD_BYTES:
@@ -185,22 +216,119 @@ def _utcnow() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _retry_after_seconds(headers) -> float | None:
+    """`Retry-After` as seconds clamped to [0, MAX_RETRY_AFTER], else None.
+
+    Both forms the header allows are accepted: delta-seconds (integer or
+    float) and an HTTP-date. A header the server sent but we cannot parse is
+    treated as absent, so the caller falls back to exponential backoff.
+    """
+    if headers is None:
+        return None
+    try:
+        raw = headers.get("Retry-After")
+    except AttributeError:
+        return None
+    if raw is None:
+        return None
+    value = str(raw).strip()
+    if not value:
+        return None
+    try:
+        seconds = float(value)
+    except ValueError:
+        seconds = None
+    if seconds is not None:
+        if math.isnan(seconds) or math.isinf(seconds):
+            return None
+        return min(max(seconds, 0.0), MAX_RETRY_AFTER)
+    try:
+        when = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    if when is None:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    delta = (when - datetime.now(timezone.utc)).total_seconds()
+    return min(max(delta, 0.0), MAX_RETRY_AFTER)
+
+
+def _failure_name(exc: BaseException) -> str:
+    """Class name for the error string, unwrapping `URLError`'s cause.
+
+    `urlopen` wraps every `OSError` in `URLError`, which would otherwise
+    collapse "connection reset" (transient) and "name or service not known"
+    (not transient) into one non-retryable name.
+    """
+    reason = getattr(exc, "reason", None)
+    if isinstance(exc, URLError) and isinstance(reason, BaseException):
+        return type(reason).__name__
+    return type(exc).__name__
+
+
 def _is_retryable(error: str) -> bool:
     """Transient failures worth another attempt.
 
-    Throttling (429), server errors (5xx) and network/timeout errors
-    (`fetch-failed: <Type>`) usually clear on a second try — a burst of
-    requests gets rate-limited but the same page answers moments later.
-    Everything else (other 4xx, non-http URLs, oversized bodies, pages with
-    no usable body) is a property of the URL, not of the moment.
+    Throttling (429), server errors (5xx) and a short allowlist of network
+    failures usually clear on a second try — a burst of requests gets
+    rate-limited but the same page answers moments later. Everything else
+    (other 4xx, DNS/TLS `URLError`s, non-http URLs, oversized bodies, pages
+    with no usable body) is a property of the URL, not of the moment.
     """
     if not error:
         return False
-    if error == "http-429" or error.startswith("fetch-failed:"):
+    if error == "http-429":
         return True
     if error.startswith("http-5") and error[len("http-"):].isdigit():
         return True
+    if error.startswith("fetch-failed:"):
+        return error.split(":", 1)[1].strip() in _TRANSIENT_FAILURES
     return False
+
+
+def _retry_delay(result: dict[str, Any], attempt: int, retry_delay: float) -> float:
+    """Server-requested delay for 429/503, else exponential backoff."""
+    error = str(result.get("error") or "")
+    retry_after = result.get("retryAfter")
+    if error in ("http-429", "http-503") and isinstance(retry_after, (int, float)):
+        return min(max(float(retry_after), 0.0), MAX_RETRY_AFTER)
+    return retry_delay * (2 ** attempt)
+
+
+class _RetryBudget:
+    """Run-level guard so an all-failing board cannot multiply the load.
+
+    Bounds the total number of retries and the run of consecutive retryable
+    failures. Once tripped, every remaining job gets a single attempt — the
+    pre-retry behavior — and the run reports `retriesDisabled`.
+    """
+
+    def __init__(
+        self,
+        max_total_retries: int,
+        max_consecutive_failures: int,
+    ) -> None:
+        self.remaining = max(0, int(max_total_retries))
+        self.max_consecutive = max(0, int(max_consecutive_failures))
+        self.consecutive = 0
+        self.disabled = self.remaining == 0
+
+    def allow(self) -> bool:
+        return not self.disabled
+
+    def spend(self) -> None:
+        self.remaining -= 1
+        if self.remaining <= 0:
+            self.disabled = True
+
+    def observe(self, retryable_failure: bool) -> None:
+        if not retryable_failure:
+            self.consecutive = 0
+            return
+        self.consecutive += 1
+        if self.max_consecutive and self.consecutive >= self.max_consecutive:
+            self.disabled = True
 
 
 def _describe_with_retry(
@@ -211,16 +339,27 @@ def _describe_with_retry(
     retries: int,
     retry_delay: float,
     sleep,
-) -> dict[str, Any]:
-    """Fetch one JD, retrying transient errors with exponential backoff."""
+    budget: _RetryBudget,
+) -> tuple[dict[str, Any], bool]:
+    """Fetch one JD, retrying transient errors with backoff.
+
+    Returns the result and whether the host answered 429 at any point, so the
+    caller can pace the next job on that host even if a retry succeeded.
+    """
     attempts = max(0, int(retries))
     result = fetch_job_description(url, timeout=timeout, fetch=fetch)
+    saw_429 = result.get("error") == "http-429"
     attempt = 0
-    while attempt < attempts and _is_retryable(str(result.get("error") or "")):
-        sleep(retry_delay * (2 ** attempt))
+    while True:
+        retryable = _is_retryable(str(result.get("error") or ""))
+        budget.observe(retryable)
+        if not retryable or attempt >= attempts or not budget.allow():
+            return result, saw_429
+        budget.spend()
+        sleep(_retry_delay(result, attempt, retry_delay))
         attempt += 1
         result = fetch_job_description(url, timeout=timeout, fetch=fetch)
-    return result
+        saw_429 = saw_429 or result.get("error") == "http-429"
 
 
 def fetch_descriptions(
@@ -232,16 +371,24 @@ def fetch_descriptions(
     fetch=None,
     retries: int = 2,
     retry_delay: float = 1.0,
+    host_delay: float = 1.0,
+    max_total_retries: int = DEFAULT_MAX_TOTAL_RETRIES,
+    max_consecutive_failures: int = DEFAULT_MAX_CONSECUTIVE_FAILURES,
     sleep=time.sleep,
 ) -> dict[str, Any]:
     """Fill `description` for staged jobs in place. Never raises for fetch
     failures — they land in `failed` and the run continues.
 
     Transient errors (429, 5xx, network/timeout) get up to `retries` extra
-    attempts, sleeping `retry_delay * 2**attempt` between them; `sleep` is
-    injectable so tests stay instant. A burst of requests against one board
-    is exactly the case that throttles, and a single lost pass used to leave
-    every affected row scored as if it had no JD.
+    attempts; a 429/503 honours the server's `Retry-After` (capped at
+    `MAX_RETRY_AFTER`) instead of the `retry_delay * 2**attempt` backoff.
+    Once a host answers 429, the next job on that host waits `host_delay`
+    first. `sleep` is injectable so tests stay instant.
+
+    A run-level budget (`max_total_retries` and `max_consecutive_failures`)
+    stops retrying for the remainder of the run when a board is down, and the
+    summary then carries an additive `retriesDisabled: true` — an all-failing
+    board must not turn one request per row into three plus minutes of sleep.
 
     `matches.json` keeps its documented object shape (#32): the wrapper and
     its summary keys are read through `load_matches` and written back through
@@ -275,6 +422,8 @@ def fetch_descriptions(
                     "errors": ["unexpected shape"], "out": str(path)}
     fetched = skipped = failed = 0
     errors: list[str] = []
+    budget = _RetryBudget(max_total_retries, max_consecutive_failures)
+    throttled_hosts: set[str] = set()
     for job in jobs:
         if not isinstance(job, dict):
             skipped += 1
@@ -283,9 +432,16 @@ def fetch_descriptions(
             skipped += 1
             continue
         url = str(job.get("url") or "")
-        result = _describe_with_retry(
+        # A host that just answered 429 gets a pause before the next job,
+        # whether or not the retried request eventually succeeded.
+        host = urlsplit(url).netloc
+        if host and host in throttled_hosts:
+            sleep(host_delay)
+        result, saw_429 = _describe_with_retry(
             url, timeout=timeout, fetch=fetch, retries=retries,
-            retry_delay=retry_delay, sleep=sleep)
+            retry_delay=retry_delay, sleep=sleep, budget=budget)
+        if saw_429 and host:
+            throttled_hosts.add(host)
         if "error" in result:
             failed += 1
             if len(errors) < 5:
@@ -305,5 +461,9 @@ def fetch_descriptions(
         write_matches(path, envelope)
     else:
         path.write_text(json.dumps(jobs, indent=2, ensure_ascii=False) + "\n")
-    return {"fetched": fetched, "skipped": skipped, "failed": failed,
-            "errors": errors, "out": str(path)}
+    summary: dict[str, Any] = {
+        "fetched": fetched, "skipped": skipped, "failed": failed,
+        "errors": errors, "out": str(path)}
+    if budget.disabled:
+        summary["retriesDisabled"] = True
+    return summary

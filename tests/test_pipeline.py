@@ -11,6 +11,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
+from email.message import Message
 from pathlib import Path
 from urllib.error import HTTPError
 
@@ -2005,11 +2006,17 @@ class FetchDescriptionsTests(unittest.TestCase):
         return fetch
 
     @staticmethod
-    def _http_error(url, code, msg="http error"):
+    def _http_error(url, code, msg="http error", headers=None):
         """HTTPError with no body, closed so it raises no ResourceWarning."""
-        exc = HTTPError(url, code, msg, None, None)
+        exc = HTTPError(url, code, msg, headers, None)
         exc.close()
         return exc
+
+    @staticmethod
+    def _retry_after_headers(value):
+        headers = Message()
+        headers["Retry-After"] = value
+        return headers
 
     def test_strip_html_keeps_prose_drops_chrome(self):
         from network_jobs.descriptions import strip_html
@@ -2056,14 +2063,15 @@ class FetchDescriptionsTests(unittest.TestCase):
             fetch_job_description("https://x/gone", fetch=fetch),
             {"error": "http-404"})
 
-    def _retry_triage(self):
-        """Triage dir with one undescribed row, for the retry tests."""
+    def _retry_triage(self, n=1):
+        """Triage dir with `n` undescribed rows on one host."""
         tmp = Path(tempfile.mkdtemp(prefix="nj-desc-retry-"))
         self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
         index = tmp / "triage" / "t" / "index"
         index.mkdir(parents=True)
         (index / "matches.json").write_text(json.dumps([
-            {"title": "Senior PM", "url": "https://x/jobs/1"},
+            {"title": f"Senior PM {i}", "url": f"https://x/jobs/{i}"}
+            for i in range(1, n + 1)
         ]) + "\n")
         return tmp / "triage" / "t"
 
@@ -2161,6 +2169,246 @@ class FetchDescriptionsTests(unittest.TestCase):
         self.assertIn("http-404", result["errors"][0])
         self.assertEqual(len(calls), 1)
         self.assertEqual(sleeps, [])
+
+    def test_real_http_error_carries_retry_after(self):
+        # The 429 path through the real urlopen, not an injected fetch: the
+        # handler's Retry-After must reach the result.
+        import http.server
+        import threading
+        from network_jobs.descriptions import fetch_job_description
+
+        seen = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                seen.append(self.path)
+                self.send_response(429)
+                self.send_header("Retry-After", "2")
+                self.send_header("Content-Type", "text/html")
+                self.end_headers()
+                self.wfile.write(b"slow down")
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        port = server.server_address[1]
+
+        result = fetch_job_description(
+            f"http://127.0.0.1:{port}/jobs/1", timeout=5)
+
+        self.assertEqual(result["error"], "http-429")
+        self.assertEqual(result["retryAfter"], 2.0)
+        self.assertEqual(len(seen), 1)
+
+    def test_retry_after_seconds_replaces_backoff(self):
+        # #64 review: a throttled host that says "wait 5s" must be obeyed
+        # instead of the 1s exponential guess.
+        from network_jobs.descriptions import fetch_descriptions
+
+        triage = self._retry_triage()
+        calls = []
+        sleeps = []
+
+        def fetch(url):
+            calls.append(url)
+            if len(calls) == 1:
+                raise self._http_error(
+                    url, 429, "slow down", self._retry_after_headers("5"))
+            return 200, "text/html", self.HTML.encode()
+
+        result = fetch_descriptions(
+            triage, fetch=fetch, sleep=lambda s: sleeps.append(s))
+
+        self.assertEqual(result["fetched"], 1)
+        self.assertEqual(result["failed"], 0)
+        self.assertEqual(sleeps, [5.0])
+        self.assertNotIn("retriesDisabled", result)
+
+    def test_retry_after_applies_to_503(self):
+        # 503 is the other status where the server knows better than we do.
+        from network_jobs.descriptions import fetch_descriptions
+
+        triage = self._retry_triage()
+        calls = []
+        sleeps = []
+
+        def fetch(url):
+            calls.append(url)
+            if len(calls) == 1:
+                raise self._http_error(
+                    url, 503, "unavailable", self._retry_after_headers("4"))
+            return 200, "text/html", self.HTML.encode()
+
+        result = fetch_descriptions(
+            triage, fetch=fetch, sleep=lambda s: sleeps.append(s))
+
+        self.assertEqual(result["fetched"], 1)
+        self.assertEqual(sleeps, [4.0])
+
+    def test_retry_after_http_date_is_used(self):
+        # The header's other legal form: an absolute HTTP-date.
+        import email.utils
+        import time as _time
+        from network_jobs.descriptions import fetch_descriptions
+
+        triage = self._retry_triage()
+        calls = []
+        sleeps = []
+        when = email.utils.formatdate(_time.time() + 2, usegmt=True)
+
+        def fetch(url):
+            calls.append(url)
+            if len(calls) == 1:
+                raise self._http_error(
+                    url, 429, "slow down", self._retry_after_headers(when))
+            return 200, "text/html", self.HTML.encode()
+
+        result = fetch_descriptions(
+            triage, fetch=fetch, sleep=lambda s: sleeps.append(s))
+
+        self.assertEqual(result["fetched"], 1)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(sleeps), 1)
+        self.assertGreater(sleeps[0], 0)
+        self.assertLessEqual(sleeps[0], 30)
+
+    def test_retry_after_is_capped(self):
+        # A server asking for 16 minutes must not stall the run for 16 minutes.
+        from network_jobs.descriptions import (
+            fetch_descriptions, fetch_job_description)
+
+        triage = self._retry_triage()
+        sleeps = []
+        calls = []
+
+        def fetch(url):
+            calls.append(url)
+            if len(calls) == 1:
+                raise self._http_error(
+                    url, 429, "slow down", self._retry_after_headers("999"))
+            return 200, "text/html", self.HTML.encode()
+
+        def failing(url):
+            raise self._http_error(
+                url, 429, "slow down", self._retry_after_headers("999"))
+
+        direct = fetch_job_description("https://x/jobs/1", fetch=failing)
+        self.assertEqual(direct, {"error": "http-429", "retryAfter": 30.0})
+
+        result = fetch_descriptions(
+            triage, fetch=fetch, sleep=lambda s: sleeps.append(s))
+        self.assertEqual(result["fetched"], 1)
+        self.assertEqual(sleeps, [30.0])
+
+    def test_host_pacing_after_429(self):
+        # #64 review: after a 429, the next job on that host waits host_delay
+        # — distinct from the retry backoff, and applied even though the
+        # retried request eventually succeeded.
+        from network_jobs.descriptions import fetch_descriptions
+
+        triage = self._retry_triage(2)
+        attempts = {}
+        calls = []
+        sleeps = []
+
+        def fetch(url):
+            calls.append(url)
+            attempts[url] = attempts.get(url, 0) + 1
+            if url.endswith("/jobs/1") and attempts[url] == 1:
+                raise self._http_error(url, 429, "slow down")
+            return 200, "text/html", self.HTML.encode()
+
+        result = fetch_descriptions(
+            triage, fetch=fetch, host_delay=0.25,
+            sleep=lambda s: sleeps.append(s))
+
+        self.assertEqual(result["fetched"], 2)
+        self.assertEqual(result["failed"], 0)
+        self.assertEqual(calls, ["https://x/jobs/1", "https://x/jobs/1",
+                                 "https://x/jobs/2"])
+        # 1.0 is the retry backoff for job 1; 0.25 is the host pause before
+        # job 2. The pacing sleep sits between the two jobs, not in a retry.
+        self.assertEqual(sleeps, [1.0, 0.25])
+
+    def test_all_failing_board_disables_retries(self):
+        # #64 review: without a run-level budget an all-failing board makes
+        # 3x the requests and sleeps per retry. The breaker trips and the run
+        # finishes with the pre-retry request count instead.
+        from network_jobs.descriptions import fetch_descriptions
+
+        triage = self._retry_triage(10)
+        calls = []
+        sleeps = []
+
+        def fetch(url):
+            calls.append(url)
+            return 503, "text/html", b"unavailable"
+
+        result = fetch_descriptions(
+            triage, fetch=fetch, sleep=lambda s: sleeps.append(s))
+
+        self.assertEqual(result["fetched"], 0)
+        self.assertEqual(result["failed"], 10)
+        self.assertTrue(result["retriesDisabled"])
+        self.assertEqual(set(result), {"fetched", "skipped", "failed",
+                                       "errors", "out", "retriesDisabled"})
+        self.assertLess(len(calls), 20)  # 13 with the default budget
+        self.assertGreater(len(calls), 10)  # but it did retry first
+        self.assertLessEqual(sum(sleeps), 5)
+        written = json.loads((triage / "index" / "matches.json").read_text())
+        self.assertNotIn("description", written["jobs"][0])
+
+    def test_url_errors_are_not_retried(self):
+        # #64 review: DNS/TLS failures do not clear by retrying. urlopen wraps
+        # them in URLError, so the reason's class is what gets classified.
+        import socket
+        from urllib.error import URLError
+        from network_jobs.descriptions import fetch_descriptions
+
+        for exc in (
+            URLError(socket.gaierror(-2, "Name or service not known")),
+            URLError("dns lookup failed"),
+        ):
+            triage = self._retry_triage()
+            calls = []
+            sleeps = []
+
+            def fetch(url, exc=exc):
+                calls.append(url)
+                raise exc
+
+            result = fetch_descriptions(
+                triage, fetch=fetch, sleep=lambda s: sleeps.append(s))
+
+            self.assertEqual(result["failed"], 1)
+            self.assertEqual(len(calls), 1, exc)
+            self.assertEqual(sleeps, [], exc)
+
+    def test_retryable_classification(self):
+        from network_jobs.descriptions import _is_retryable
+
+        transient = (
+            "http-429", "http-500", "http-503",
+            "fetch-failed: TimeoutError", "fetch-failed: ConnectionError",
+            "fetch-failed: ConnectionResetError",
+            "fetch-failed: ConnectionRefusedError",
+            "fetch-failed: RemoteDisconnected",
+        )
+        permanent = (
+            "http-403", "http-404", "http-408", "http-410", "http-500x",
+            "non-http-url", "too-large", "no-usable-body", "",
+            "fetch-failed: URLError", "fetch-failed: SSLError",
+            "fetch-failed: ValueError", "fetch-failed: InvalidURL",
+            "fetch-failed: gaierror",
+        )
+        for error in transient:
+            self.assertTrue(_is_retryable(error), error)
+        for error in permanent:
+            self.assertFalse(_is_retryable(error), error)
 
     def test_fetch_descriptions_writes_back_matches(self):
         from network_jobs.descriptions import fetch_descriptions
