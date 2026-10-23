@@ -24,7 +24,8 @@
    ```
 
    The tag triggers [`.github/workflows/publish.yml`](../.github/workflows/publish.yml),
-   which re-runs the tests, checks the CLI syntax, then publishes.
+   which re-runs the tests, checks the CLI syntax, publishes, and then creates
+   the GitHub release.
 7. Watch the run, then confirm:
 
    ```bash
@@ -45,6 +46,21 @@
    is a static deploy of `site/public/index.html`, updated only by checklist
    step 2 and redeployed by Workers Builds when a push to `main` touches
    `site/**`.
+8. Confirm the GitHub release:
+
+   ```bash
+   gh release view vX.Y.Z
+   ```
+
+   The workflow's `release` job runs only after the npm publish succeeds, uses
+   the matching `## vX.Y.Z` section of `CHANGELOG.md` (falling back to
+   generated notes if the section is missing), marks it latest, and leaves an
+   existing release untouched on a rerun. To backfill an older tag, create it
+   manually with `--latest=false`:
+
+   ```bash
+   gh release create vX.Y.Z --title vX.Y.Z --notes-file notes.md --latest=false
+   ```
 
 The workflow refuses to publish when the tag doesn't match `package.json`, so a
 mistyped tag fails before anything ships.
