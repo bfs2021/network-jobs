@@ -613,6 +613,187 @@ class PaginationTests(unittest.TestCase):
         self.assertEqual(len(result["listings"]), 60)
 
 
+class EnvelopeOffsetPaginationTests(unittest.TestCase):
+    """Eightfold-shaped boards (NVIDIA): rows and the total sit under `data`,
+    and the board pages by `start`, not `offset`/`page`. Upstream read one
+    page, found no total, saw no page param, and recorded `complete: true` at
+    10 of 2,725 — which the ingest expiry then trusted. The fallback runs only
+    after detect_next finds no next page, so every shape detect_next already
+    handled is untouched; the tests below pin both halves."""
+
+    @staticmethod
+    def _rows(n, prefix="Eng"):
+        return [{"title": f"{prefix} {i}", "url": f"https://x.io/jobs/{i}", "location": "NY"} for i in range(n)]
+
+    @staticmethod
+    def _fetch(builder):
+        def fake_fetch(url):
+            import json as _json
+            from urllib.parse import parse_qsl, urlsplit
+            q = dict(parse_qsl(urlsplit(url).query))
+            body = builder(q)
+            return body, 200, _json.dumps(body).encode()
+        return fake_fetch
+
+    @classmethod
+    def _eightfold(cls, total, size):
+        positions = [
+            {"id": 893000000000 + i, "name": f"Engineer {i}", "location": "Santa Clara, CA",
+             "positionUrl": f"/careers/job/{893000000000 + i}"}
+            for i in range(total)
+        ]
+        return cls._fetch(lambda q: {"status": 200, "error": None, "data": {
+            "positions": positions[int(q.get("start", "0")):int(q.get("start", "0")) + size],
+            "count": total}})
+
+    def test_nested_total_and_start_param_are_followed(self):
+        from network_jobs.pagination import paginate
+        url = "https://jobs.example.com/api/pcsx/search?domain=example.com&query=&start=0"
+        result = paginate(url, fetch=self._eightfold(25, 10), max_pages=10)
+        pag = result["pagination"]
+        self.assertEqual(pag["pages"], 3)
+        self.assertEqual(pag["scheme"], "start")
+        self.assertTrue(pag["complete"])
+        self.assertEqual(pag["status"], "complete")
+        self.assertEqual(len(result["listings"]), 25)
+        # positionUrl is a canonical page link, absolutized at the host root
+        self.assertEqual(result["listings"][0]["url"],
+                         "https://jobs.example.com/careers/job/893000000000")
+        self.assertEqual(result["fetchLog"][1]["url"],
+                         "https://jobs.example.com/api/pcsx/search?domain=example.com&query=&start=10")
+
+    def test_cap_on_envelope_board_is_truncated_not_complete(self):
+        from network_jobs.pagination import paginate
+        url = "https://jobs.example.com/api/pcsx/search?domain=example.com&query=&start=0"
+        result = paginate(url, fetch=self._eightfold(2725, 10), max_pages=2)
+        pag = result["pagination"]
+        self.assertFalse(pag["complete"])
+        self.assertTrue(pag["truncated"])
+        self.assertEqual(pag["status"], "truncated")
+        self.assertEqual(len(result["listings"]), 20)
+
+    def test_start_offset_bootstraps_from_the_url(self):
+        from network_jobs.pagination import paginate
+        url = "https://jobs.example.com/api/pcsx/search?start=20"
+        result = paginate(url, fetch=self._eightfold(25, 10), max_pages=10)
+        self.assertEqual(len(result["listings"]), 5)
+        self.assertTrue(result["pagination"]["complete"])
+        self.assertEqual(result["pagination"]["pages"], 1)
+
+    # --- shapes detect_next already handled must come out exactly as before ---
+
+    def test_unrelated_nested_count_does_not_switch_a_page_board_to_offset(self):
+        from network_jobs.pagination import paginate
+        rows = self._rows(100)
+        fetch = self._fetch(lambda q: {"jobs": rows[(int(q.get("page", "1")) - 1) * 50:int(q.get("page", "1")) * 50],
+                                       "data": {"count": 1000, "facets": {}}})
+        result = paginate("https://x.io/api/jobs", fetch=fetch, max_pages=10, page_size=50)
+        self.assertEqual(len(result["listings"]), 100)
+        self.assertTrue(result["pagination"]["complete"])
+        self.assertEqual(result["pagination"]["scheme"], "page")
+
+    def test_digit_valued_filter_beside_page_is_not_an_offset(self):
+        from network_jobs.pagination import paginate
+        rows = self._rows(20)
+        fetch = self._fetch(lambda q: {"jobs": rows[(int(q.get("page", "1")) - 1) * 10:int(q.get("page", "1")) * 10],
+                                       "total": 20})
+        result = paginate("https://x.io/api/jobs?from=0&page=1", fetch=fetch, max_pages=10, page_size=10)
+        self.assertEqual(len(result["listings"]), 20)
+        self.assertTrue(result["pagination"]["complete"])
+        self.assertNotIn("from=10", result["fetchLog"][1]["url"])
+
+    def test_digit_valued_filter_without_page_still_pages_by_number(self):
+        # `from=2020` is a year filter on a page-counting board with no page
+        # param in the URL and no total: detect_next's full-page fallback must
+        # keep winning. (With a top-level total upstream itself takes the offset
+        # branch and stops at 50; that is pre-existing and not changed here.)
+        from network_jobs.pagination import paginate
+        rows = self._rows(100)
+        fetch = self._fetch(lambda q: {"jobs": rows[(int(q.get("page", "1")) - 1) * 50:int(q.get("page", "1")) * 50]})
+        result = paginate("https://x.io/api/jobs?from=2020", fetch=fetch, max_pages=10, page_size=50)
+        self.assertEqual(len(result["listings"]), 100)
+        self.assertTrue(result["pagination"]["complete"])
+        self.assertNotIn("from=2070", result["fetchLog"][1]["url"])
+
+    def test_start_filter_on_a_page_board_is_not_promoted(self):
+        # Same board with `start=2020`: rows live at the top level, so there is
+        # no envelope count beside them and the fallback declines.
+        from network_jobs.pagination import paginate
+        rows = self._rows(100)
+        fetch = self._fetch(lambda q: {"jobs": rows[(int(q.get("page", "1")) - 1) * 50:int(q.get("page", "1")) * 50],
+                                       "data": {"count": 999}})
+        result = paginate("https://x.io/api/jobs?start=2020", fetch=fetch, max_pages=10, page_size=50)
+        self.assertEqual(len(result["listings"]), 100)
+        self.assertTrue(result["pagination"]["complete"])
+        self.assertNotIn("start=2070", "".join(e["url"] for e in result["fetchLog"]))
+
+    def test_first_link_only_then_page_and_total_keeps_counting(self):
+        from network_jobs.pagination import paginate
+        rows = self._rows(100)
+
+        def build(q):
+            page = int(q.get("page", "1"))
+            body = {"jobs": rows[(page - 1) * 10:page * 10], "total": 100}
+            if page == 1:
+                body["next"] = "https://x.io/api/jobs?page=2"
+            return body
+        result = paginate("https://x.io/api/jobs", fetch=self._fetch(build), max_pages=20, page_size=10)
+        self.assertEqual(len(result["listings"]), 100)
+        self.assertTrue(result["pagination"]["complete"])
+
+    def test_link_paged_board_with_unrelated_nested_count(self):
+        from network_jobs.pagination import paginate
+        rows = self._rows(150)
+
+        def build(q):
+            page = int(q.get("page", "1"))
+            body = {"jobs": rows[(page - 1) * 10:page * 10], "data": {"count": 1000, "positions": []}}
+            if page < 15:
+                body["next"] = f"https://x.io/api/jobs?page={page + 1}"
+            return body
+        result = paginate("https://x.io/api/jobs?page=1", fetch=self._fetch(build), max_pages=15, page_size=50)
+        self.assertEqual(len(result["listings"]), 150)
+        self.assertTrue(result["pagination"]["complete"])
+        self.assertFalse(result["pagination"]["truncated"])
+
+    def test_start_strategy_survives_a_larger_later_page(self):
+        # Second-reader counterexample: page 1 has 10 rows, later pages 50.
+        # The fallback's scheme must not let detect_next invent offset= once
+        # a page reaches page_size; the crawl stays on start= to the end.
+        from network_jobs.pagination import paginate
+        rows = [{"id": i, "name": f"Engineer {i}", "location": "NY", "positionUrl": f"/job/{i}"} for i in range(100)]
+
+        def build(q):
+            start = int(q.get("start", "0"))
+            size = 10 if start == 0 else 50
+            return {"data": {"positions": rows[start:start + size], "count": 100}}
+        result = paginate("https://x.io/api/search?start=0", fetch=self._fetch(build), max_pages=15)
+        self.assertEqual(len(result["listings"]), 100)
+        self.assertTrue(result["pagination"]["complete"])
+        self.assertEqual(result["pagination"]["scheme"], "start")
+        urls = [e["url"] for e in result["fetchLog"]]
+        self.assertEqual(urls, ["https://x.io/api/search?start=0", "https://x.io/api/search?start=10",
+                                "https://x.io/api/search?start=60"])
+
+    def test_envelope_count_must_sit_beside_the_extracted_rows(self):
+        from network_jobs.pagination import detect_next_envelope, extract_job_list
+        url = "https://x.io/api/jobs?start=0"
+        beside = {"status": 200, "data": {"positions": self._rows(10), "count": 25}}
+        rows = extract_job_list(beside)
+        self.assertEqual(detect_next_envelope(url, beside, rows, last_count=10),
+                         "https://x.io/api/jobs?start=10")
+        elsewhere = {"jobs": self._rows(10), "data": {"positions": self._rows(3, "Other"), "count": 999}}
+        rows = extract_job_list(elsewhere)
+        self.assertIsNone(detect_next_envelope(url, elsewhere, rows, last_count=10))
+        two_hops = {"data": {"payload": {"positions": self._rows(10), "count": 123}}}
+        rows = extract_job_list(two_hops)
+        self.assertIsNone(detect_next_envelope(url, two_hops, rows, last_count=10))
+        self.assertIsNone(detect_next_envelope("https://x.io/api/jobs?start=2026-01-01", beside,
+                                               extract_job_list(beside), last_count=10))
+        self.assertIsNone(detect_next_envelope("https://x.io/api/jobs?start=20", beside,
+                                               extract_job_list(beside), last_count=5))
+
+
 class FingerprintExpiryTests(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="nj-fp-"))

@@ -32,7 +32,8 @@ TITLE_KEYS = ("title", "jobTitle", "job_title", "name", "text", "role")
 # outranks an absolute `jobUrl`/`job_url` (#49).
 URL_KEYS = (
     "url", "absolute_url", "absoluteUrl", "hostedUrl", "hosted_url",
-    "jobUrl", "job_url", "job_path", "applyUrl", "apply_url",
+    "jobUrl", "job_url", "job_path", "positionUrl", "position_url",
+    "applyUrl", "apply_url",
     "url_next_step", "urlNextStep", "gh_src",
 )
 LOC_KEYS = ("location", "jobLocation", "job_location", "workplace", "city")
@@ -379,6 +380,55 @@ def _absolute(base: str, maybe: str) -> str:
     return urljoin(base, maybe)
 
 
+def _rows_envelope(payload: Any, rows: list[Any]) -> dict[str, Any] | None:
+    """The dict one hop down that holds exactly `rows` (NVIDIA: `data`), else None.
+
+    Identity, not shape: the list must be the one extract_job_list returned, so
+    a count in some other envelope never speaks for these rows.
+    """
+    if not isinstance(payload, dict):
+        return None
+    for value in payload.values():
+        if isinstance(value, dict) and any(v is rows for v in value.values()):
+            return value
+    return None
+
+
+def detect_next_envelope(
+    url: str,
+    payload: Any,
+    rows: list[Any],
+    *,
+    last_count: int,
+) -> str | None:
+    """Fallback for Eightfold-shaped boards (NVIDIA, UKG), tried only after
+    detect_next found no next page: rows and their total sit together one
+    envelope down (`data.positions`, `data.count`) and the URL pages by a
+    digit-valued `start`. Returns the next URL or None. It can only extend a
+    crawl detect_next would have called complete; it never overrides one.
+    """
+    if last_count == 0 or not rows:
+        return None
+    q = dict(parse_qsl(urlsplit(url).query, keep_blank_values=True))
+    if "page" in q or "pageNumber" in q or "offset" in q:
+        return None
+    if not q.get("start", "").isdigit():
+        return None
+    env = _rows_envelope(payload, rows)
+    if env is None:
+        return None
+    total = None
+    for key in ("count", "total", "totalCount", "totalFound"):
+        value = env.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            total = int(value)
+            break
+    next_start = int(q["start"]) + last_count
+    if total is None or next_start >= total:
+        return None
+    return _set_query(url, start=next_start)
+
+
 def detect_next(
     url: str,
     payload: Any,
@@ -390,7 +440,8 @@ def detect_next(
     fetched: int,
     scheme: str = "none",
 ) -> tuple[str | None, str]:
-    """Return (next_url, scheme). scheme is page|cursor|offset|link|none."""
+    """Return (next_url, scheme). scheme is page|cursor|offset|link|none
+    (`start` is set by the paginate loop when detect_next_envelope took over)."""
     if isinstance(payload, dict):
         for key in NEXT_KEYS:
             value = payload.get(key)
@@ -591,6 +642,16 @@ def paginate(
         )
         if found != "none":
             scheme = found
+        if not next_url or next_url == current:
+            env_next = detect_next_envelope(
+                current, payload, raw_jobs, last_count=last_count,
+            )
+            if env_next and env_next != current:
+                # Its own scheme name: detect_next's offset branch keys on
+                # scheme == "offset" and would otherwise invent an offset=
+                # param on a later, larger page.
+                next_url, found = env_next, "start"
+                scheme = found
         if not next_url or next_url == current or last_count == 0:
             complete = True
             break

@@ -205,7 +205,7 @@ the board provides one and the row lacks it.
 
 ### index/pagination.json
 
-Written by `careers-discover/helpers/paginate-listings.py` when a jobs JSON/API is followed (page / cursor / offset). Cap `maxPages` (default 15). ATS-agnostic — no adapter matrix.
+Written by `careers-discover/helpers/paginate-listings.py` when a jobs JSON/API is followed (page / cursor / offset, or `start` for boards whose rows and count sit together under an envelope, e.g. Eightfold's `data.positions` / `data.count`). Cap `maxPages` (default 15). ATS-agnostic — no adapter matrix.
 
 ```json
 {
