@@ -16,7 +16,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 from .matches import MatchesFormatError, load_matches, write_matches
@@ -138,13 +138,48 @@ def _texts_from_payload(payload: Any) -> str:
         value = payload.get(key)
         if isinstance(value, str) and len(value) > len(best):
             best = value
-    jobs = payload.get("job") if isinstance(payload.get("job"), dict) else None
-    if jobs:
+    # Most APIs wrap the row (`job`) or the response (`data`). Eightfold's
+    # position_details endpoint returns `{data: {jobDescription: ...}}`.
+    for container_key in ("job", "data"):
+        container = payload.get(container_key)
+        if not isinstance(container, dict):
+            continue
         for key in _JSON_TEXT_KEYS:
-            value = jobs.get(key)
+            value = container.get(key)
             if isinstance(value, str) and len(value) > len(best):
                 best = value
     return best
+
+
+def _detail_url_from_job(job: dict[str, Any]) -> str:
+    """A JSON detail endpoint derived from the staged row, else "".
+
+    Eightfold's public PCSX search (`/api/pcsx/search?domain=...`) exposes a
+    sibling `/api/pcsx/position_details?domain=...&position_id=...` endpoint
+    for the JD body. The search rows carry no description and the listing page
+    is JS-rendered, so the detail endpoint is the only reliable source.
+
+    Only derive it from the exact search shape (path + `domain` + numeric
+    position id); every other board keeps the normal listing-page fetch.
+    """
+    source = str(job.get("sourceUrl") or "")
+    parts = urlsplit(source)
+    if not parts.path.endswith("/api/pcsx/search"):
+        return ""
+    domain = (parse_qs(parts.query).get("domain") or [""])[0].strip()
+    if not domain:
+        return ""
+    position_id = str(job.get("externalId") or "").strip()
+    if not position_id.isdigit():
+        # Some rows omit externalId; the canonical Eightfold URL ends in the
+        # same numeric position id.
+        candidate = urlsplit(str(job.get("url") or "")).path.rstrip("/").rsplit("/", 1)[-1]
+        position_id = candidate if candidate.isdigit() else ""
+    if not position_id:
+        return ""
+    detail_path = parts.path.rsplit("/", 1)[0] + "/position_details"
+    query = urlencode({"domain": domain, "position_id": position_id})
+    return urlunsplit((parts.scheme or "https", parts.netloc, detail_path, query, ""))
 
 
 def fetch_job_description(
@@ -209,6 +244,10 @@ def fetch_job_description(
             department = _dept_from_payload(payload)
             text = _texts_from_payload(payload)
             if len(text.strip()) >= 200:
+                # Eightfold's jobDescription (and many CMS bodies) is HTML;
+                # SCHEMA stores plain text.
+                if "<" in text and ">" in text:
+                    text = strip_html(text)
                 return _pack(text, department, url)
     text = strip_html(raw)
     if len(text.strip()) < 200:
@@ -500,7 +539,10 @@ def fetch_descriptions(
         if job.get("description"):
             skipped += 1
             continue
-        url = str(job.get("url") or "")
+        page_url = str(job.get("url") or "")
+        # Eightfold search rows have no body; the sibling position_details
+        # endpoint does. Any other board keeps the listing-page fetch.
+        url = _detail_url_from_job(job) or page_url
         # A host that just answered 429 (or served a bot wall) gets a pause
         # before the next job, whether or not the retried request succeeded.
         host = urlsplit(url).netloc

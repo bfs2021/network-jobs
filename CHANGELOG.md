@@ -43,6 +43,11 @@
   `postedAt` (#75): seconds or milliseconds, a real `postedAt` wins, a
   junk `postedTs` falls back to `creationTs`, and booleans/out-of-window
   values are ignored instead of becoming 1970 dates.
+- `fetch-descriptions` resolves Eightfold rows through the sibling
+  `/api/pcsx/position_details` endpoint instead of the JS-rendered listing
+  page, and parses `{data: {jobDescription}}` (stripping HTML before the
+  ~10k-char truncation). Other boards keep the page fetch; the schema,
+  retry/backoff, and failure behavior are unchanged (#76).
 
 ## v1.9.0 — 2026-10-22
 

@@ -2647,6 +2647,71 @@ class FetchDescriptionsTests(unittest.TestCase):
         self.assertIn("error", fetch_job_description("https://x/gone", fetch=fetch))
         self.assertIn("error", fetch_job_description("not a url", fetch=fetch))
 
+    def test_fetch_json_data_job_description(self):
+        # Eightfold's position_details wraps the body in `data`; the JSON
+        # path also strips HTML before storing plain text.
+        from network_jobs.descriptions import fetch_job_description
+
+        body = json.dumps({"data": {
+            "jobDescription": "<p>" + ("Own payments infrastructure. " * 20) + "</p>"}})
+        fetch = self._fetch({"https://x/api/3": (200, "application/json", body)})
+        result = fetch_job_description("https://x/api/3", fetch=fetch)
+        self.assertIn("Own payments infrastructure", result["description"])
+        self.assertNotIn("<p>", result["description"])
+
+    def test_fetch_descriptions_uses_eightfold_position_details(self):
+        # The search row has no body and its listing page is JS-rendered; the
+        # sibling position_details endpoint is the reliable source.
+        from network_jobs.descriptions import fetch_descriptions
+
+        tmp = Path(tempfile.mkdtemp(prefix="nj-desc-eightfold-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        triage = tmp / "triage" / "t"
+        index = triage / "index"
+        index.mkdir(parents=True)
+        (index / "matches.json").write_text(json.dumps([{
+            "title": "Senior Software Engineer",
+            "url": "https://jobs.example.com/careers/job/123",
+            "sourceUrl": "https://jobs.example.com/api/pcsx/search?domain=example.com&query=&start=0",
+            "externalId": "123",
+        }]) + "\n")
+        detail = ("https://jobs.example.com/api/pcsx/position_details"
+                  "?domain=example.com&position_id=123")
+        body = json.dumps({"data": {
+            "jobDescription": "<p>" + ("Build reliable systems. " * 20) + "</p>"}})
+        calls = []
+
+        def fetch(url):
+            calls.append(url)
+            if url != detail:
+                raise AssertionError(f"unexpected URL: {url}")
+            return 200, "application/json", body.encode()
+
+        result = fetch_descriptions(triage, fetch=fetch, sleep=lambda _: None)
+        self.assertEqual(result["fetched"], 1)
+        self.assertEqual(calls, [detail])
+        data = json.loads((index / "matches.json").read_text())
+        jobs = data["jobs"] if isinstance(data, dict) else data
+        self.assertIn("Build reliable systems", jobs[0]["description"])
+        self.assertNotIn("<p>", jobs[0]["description"])
+        self.assertEqual(jobs[0]["descriptionSource"], detail)
+
+    def test_fetch_descriptions_keeps_page_url_for_other_boards(self):
+        from network_jobs.descriptions import fetch_descriptions
+
+        triage = self._triage_for(["https://x/jobs/1"])
+        body = ("<html><body><p>" + ("Own payments infrastructure. " * 20)
+                + "</p></body></html>")
+        calls = []
+
+        def fetch(url):
+            calls.append(url)
+            return 200, "text/html", body.encode()
+
+        result = fetch_descriptions(triage, fetch=fetch, sleep=lambda _: None)
+        self.assertEqual(result["fetched"], 1)
+        self.assertEqual(calls, ["https://x/jobs/1"])
+
     def test_fetch_job_description_reports_http_status(self):
         # #64: the status code used to be erased into `fetch-failed: HTTPError`,
         # so 429 (retryable) and 404 (gone) looked identical.
