@@ -617,11 +617,115 @@ class PaginationTests(unittest.TestCase):
         result = paginate("https://x.io/api/jobs", fetch=fake_fetch, max_pages=5, page_size=50)
         pag = result["pagination"]
         self.assertLess(pag["pages"], 5)
-        self.assertTrue(pag["complete"])
-        self.assertFalse(pag["truncated"])
+        # #88: the duplicate page stops the crawl, but with no visible board
+        # total it cannot prove the 60 rows are the whole board.
+        self.assertFalse(pag["complete"])
+        self.assertTrue(pag["truncated"])
+        self.assertEqual(pag["status"], "truncated")
         fps = [fingerprint(j) for j in result["listings"]]
         self.assertEqual(len(fps), len(set(fps)))
         self.assertEqual(len(result["listings"]), 60)
+
+    def test_duplicate_only_page_without_total_is_truncated(self):
+        # #88: a 100-role board that re-serves page 1 used to report
+        # `complete` with 50 rows; ingest could then expire the other 50.
+        from network_jobs.pagination import paginate
+
+        rows = [
+            {"title": f"Engineer {i}", "url": f"https://x.io/jobs/{i}", "location": "New York, NY"}
+            for i in range(100)
+        ]
+
+        def fake_fetch(url):
+            import json as _json
+            payload = {"jobs": rows[:50]}
+            return payload, 200, _json.dumps(payload).encode()
+
+        result = paginate("https://x.io/api/jobs?page=1", fetch=fake_fetch,
+                          max_pages=5, page_size=50)
+        pag = result["pagination"]
+        self.assertEqual(len(result["listings"]), 50)
+        self.assertEqual(pag["pages"], 1)
+        self.assertFalse(pag["complete"])
+        self.assertTrue(pag["truncated"])
+        self.assertEqual(pag["status"], "truncated")
+
+    def test_repeated_url_without_total_is_truncated(self):
+        # #88: a repeated URL is no proof of the board's end either.
+        from network_jobs.pagination import paginate
+
+        first = [
+            {"title": f"Engineer {i}", "url": f"https://x.io/jobs/{i}", "location": "New York, NY"}
+            for i in range(10)
+        ]
+        second = [
+            {"title": f"Engineer {i}", "url": f"https://x.io/jobs/{i}", "location": "New York, NY"}
+            for i in range(10, 20)
+        ]
+
+        def fake_fetch(url):
+            import json as _json
+            page = 2 if "page=2" in url else 1
+            payload = {
+                "jobs": first if page == 1 else second,
+                "next": ("https://x.io/api/jobs?page=2" if page == 1
+                         else "https://x.io/api/jobs?page=1"),
+            }
+            return payload, 200, _json.dumps(payload).encode()
+
+        result = paginate("https://x.io/api/jobs?page=1", fetch=fake_fetch,
+                          max_pages=5, page_size=10)
+        pag = result["pagination"]
+        self.assertEqual(len(result["listings"]), 20)
+        self.assertEqual(pag["pages"], 2)
+        self.assertFalse(pag["complete"])
+        self.assertTrue(pag["truncated"])
+        self.assertEqual(pag["status"], "truncated")
+
+    def test_duplicate_page_with_covered_total_is_complete(self):
+        # #88: a visible total that the unique rows meet still completes.
+        from network_jobs.pagination import paginate
+
+        rows = [
+            {"title": f"Engineer {i}", "url": f"https://x.io/jobs/{i}", "location": "New York, NY"}
+            for i in range(50)
+        ]
+
+        def fake_fetch(url):
+            import json as _json
+            payload = {"jobs": rows, "total": 50}
+            return payload, 200, _json.dumps(payload).encode()
+
+        result = paginate("https://x.io/api/jobs?page=1", fetch=fake_fetch,
+                          max_pages=5, page_size=50)
+        pag = result["pagination"]
+        self.assertEqual(len(result["listings"]), 50)
+        self.assertTrue(pag["complete"])
+        self.assertFalse(pag["truncated"])
+        self.assertEqual(pag["status"], "complete")
+
+    def test_short_page_without_total_stays_complete(self):
+        # #88 acceptance: a normal no-total crawl that reaches a short page
+        # still completes — the board may genuinely be one page.
+        from network_jobs.pagination import paginate
+
+        rows = [
+            {"title": f"Engineer {i}", "url": f"https://x.io/jobs/{i}", "location": "New York, NY"}
+            for i in range(7)
+        ]
+
+        def fake_fetch(url):
+            import json as _json
+            payload = {"jobs": rows}
+            return payload, 200, _json.dumps(payload).encode()
+
+        result = paginate("https://x.io/api/jobs", fetch=fake_fetch,
+                          max_pages=5, page_size=10)
+        pag = result["pagination"]
+        self.assertEqual(len(result["listings"]), 7)
+        self.assertTrue(pag["complete"])
+        self.assertFalse(pag["truncated"])
+        self.assertEqual(pag["status"], "complete")
 
 
 class EnvelopeOffsetPaginationTests(unittest.TestCase):

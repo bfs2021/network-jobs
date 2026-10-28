@@ -947,7 +947,13 @@ def paginate(
             # so the dedup key includes it; GET dedup is unchanged.
             seen_key = f"{current}#{offset}" if post_mode else current
             if seen_key in seen_urls:
-                complete = True
+                # A URL seen before proves nothing about the rest of the board
+                # when no total is visible (#88).
+                if reported_total is not None and len(listings) >= reported_total:
+                    complete = True
+                else:
+                    truncated = True
+                    complete = False
                 break
             seen_urls.add(seen_key)
             payload, status, body = fetch(current)
@@ -1036,7 +1042,13 @@ def paginate(
                     payload = None
                     scheme = "start"
                     continue
-            complete = True
+            # A whole duplicate page stops the crawl, but it only proves
+            # coverage against a visible board total (#88).
+            if reported_total is not None and len(listings) >= reported_total:
+                complete = True
+            else:
+                truncated = True
+                complete = False
             break
         listings.extend(new_listings)
         pages += 1
