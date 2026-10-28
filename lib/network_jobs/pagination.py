@@ -468,6 +468,17 @@ def _count_value(obj: Any) -> int | None:
     return None
 
 
+def _meta_total(obj: Any) -> int | None:
+    """A `total`/`totalCount`/`totalFound` on a meta/pagination block."""
+    if not isinstance(obj, dict):
+        return None
+    for key in ("total", "totalCount", "totalFound"):
+        total = _numeric_total(obj.get(key))
+        if total is not None:
+            return total
+    return None
+
+
 def _top_level_total(payload: Any) -> int | None:
     """A board total on the payload or its meta block (detect_next's rule).
 
@@ -518,6 +529,68 @@ def envelope_total(payload: Any, rows: list[Any]) -> int | None:
     return _count_value(envelope) if envelope is not None else None
 
 
+def board_total(payload: Any, rows: list[Any]) -> int | None:
+    """The board's own count, including a meta block on the rows' container.
+
+    Candidates are the envelope total beside the rows, a `meta`/`pagination`
+    total on the rows' container, the top-level/meta total, and (when the
+    page is empty) a count on the empty list's container. The largest wins,
+    matching #69's "a later smaller total must not lower the bar" rule. A
+    count inside an unrelated nested object (e.g. `data.facets.count`) never
+    speaks for the rows. It deliberately does not search arbitrary depth: the
+    two-hop shape (`data.payload.positions`) stays out of scope until a live
+    board needs it.
+    """
+    candidates: list[int] = []
+    envelope = envelope_total(payload, rows)
+    if envelope is not None:
+        candidates.append(envelope)
+    container = _rows_envelope(payload, rows)
+    if container is not None:
+        for key in ("meta", "pagination"):
+            total = _meta_total(container.get(key))
+            if total is not None:
+                candidates.append(total)
+    if not rows:
+        # An empty display page can still carry the board's count. Find the
+        # empty job-list container so "empty board" is not claimed while the
+        # board says roles remain.
+        empty = _empty_rows_envelope(payload)
+        if empty is not None:
+            total = _count_value(empty)
+            if total is not None:
+                candidates.append(total)
+            for key in ("meta", "pagination"):
+                total = _meta_total(empty.get(key))
+                if total is not None:
+                    candidates.append(total)
+    top = _top_level_total(payload)
+    if top is not None:
+        candidates.append(top)
+    return max(candidates) if candidates else None
+
+
+def _empty_rows_envelope(payload: Any) -> dict[str, Any] | None:
+    """The dict holding an empty list under a LIST_KEYS name, else None.
+
+    Used only when `extract_job_list` returned no rows, so a count beside an
+    empty `positions`/`jobs` is still visible. The caller still has to find a
+    total on it; an unrelated nested `count` never becomes a total here.
+    """
+    if not isinstance(payload, dict):
+        return None
+    for key in LIST_KEYS:
+        value = payload.get(key)
+        if isinstance(value, list) and not value:
+            return payload
+    for value in payload.values():
+        if isinstance(value, dict):
+            found = _empty_rows_envelope(value)
+            if found is not None:
+                return found
+    return None
+
+
 def _start_offset(url: str) -> int | None:
     """The digit-valued `start` of a start-paged URL, else None.
 
@@ -549,8 +622,9 @@ def detect_next_envelope(
     last_count: int,
 ) -> str | None:
     """Fallback for Eightfold-shaped boards (NVIDIA, UKG): rows and their total
-    sit together (`data.positions`, `data.count`, or at the top level) and the
-    URL pages by a digit-valued `start`. Returns the next URL or None.
+    sit together (`data.positions` / `data.count`), or the total is in a
+    `meta`/`pagination` block on the rows' container or at the top level, and
+    the URL pages by a digit-valued `start`. Returns the next URL or None.
 
     The step is the rows the board returned, not the normalized count: a row
     that fails normalization must not make the crawl re-read its neighbour.
@@ -562,15 +636,9 @@ def detect_next_envelope(
     start = _start_offset(url)
     if start is None:
         return None
-    total_candidates = [
-        total for total in (
-            envelope_total(payload, rows),
-            _top_level_total(payload),
-        ) if total is not None
-    ]
-    if not total_candidates:
+    total = board_total(payload, rows)
+    if total is None:
         return None
-    total = max(total_candidates)
     next_start = start + len(rows)
     if next_start >= total:
         return None
@@ -808,13 +876,7 @@ def paginate(
 
         raw_jobs = extract_job_list(payload)
         raw_seen += len(raw_jobs)
-        total_candidates = [
-            total for total in (
-                envelope_total(payload, raw_jobs),
-                _top_level_total(payload),
-            ) if total is not None
-        ]
-        page_total = max(total_candidates) if total_candidates else None
+        page_total = board_total(payload, raw_jobs)
         if page_total is not None and page_total < len(raw_jobs):
             # A count below the rows already served is not a board total
             # (page size / facet count); do not let it lower the bar.

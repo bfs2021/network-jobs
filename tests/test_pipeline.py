@@ -677,6 +677,88 @@ class EnvelopeOffsetPaginationTests(unittest.TestCase):
         self.assertEqual(result["fetchLog"][1]["url"],
                          "https://jobs.example.com/api/pcsx/search?domain=example.com&query=&start=10")
 
+    def test_total_in_nested_meta_is_followed(self):
+        # Eightfold-style wrappers can put the total in a meta block on the
+        # rows' container instead of directly beside the list. The start
+        # fallback and reportedTotal must both see it.
+        from network_jobs.pagination import paginate
+        rows = [{"id": i, "name": f"Engineer {i}", "location": "NY",
+                 "positionUrl": f"/job/{i}"} for i in range(25)]
+
+        def build(q):
+            start = int(q.get("start", "0"))
+            return {"data": {"positions": rows[start:start + 10],
+                             "meta": {"total": 25}}}
+
+        result = paginate("https://x.io/api/search?start=0",
+                          fetch=self._fetch(build), max_pages=10)
+        pag = result["pagination"]
+        self.assertEqual(len(result["listings"]), 25)
+        self.assertEqual(pag["pages"], 3)
+        self.assertEqual(pag["scheme"], "start")
+        self.assertEqual(pag["reportedTotal"], 25)
+        self.assertTrue(pag["complete"])
+        self.assertEqual([e["url"] for e in result["fetchLog"]], [
+            "https://x.io/api/search?start=0",
+            "https://x.io/api/search?start=10",
+            "https://x.io/api/search?start=20",
+        ])
+
+    def test_nested_meta_total_shortfall_is_truncated(self):
+        # A total in data.meta is enough to keep the expiry gate closed even
+        # when there is no next-page signal to follow.
+        from network_jobs.pagination import paginate
+        rows = self._rows(10)
+        fetch = self._fetch(lambda q: {"data": {
+            "positions": rows, "meta": {"total": 100}}})
+        result = paginate("https://x.io/api/jobs", fetch=fetch, max_pages=10)
+        pag = result["pagination"]
+        self.assertEqual(len(result["listings"]), 10)
+        self.assertEqual(pag["reportedTotal"], 100)
+        self.assertFalse(pag["complete"])
+        self.assertTrue(pag["truncated"])
+        self.assertEqual(pag["status"], "truncated")
+
+    def test_meta_count_is_not_a_board_total(self):
+        # `data.meta.count` is not a pagination total; an unrelated nested
+        # count must not speak for the rows.
+        from network_jobs.pagination import paginate
+        rows = self._rows(20)
+
+        def build(q):
+            page = int(q.get("page", "1"))
+            return {"jobs": rows[(page - 1) * 10:page * 10],
+                    "data": {"meta": {"count": 999}}}
+
+        result = paginate("https://x.io/api/jobs?page=1",
+                          fetch=self._fetch(build), max_pages=10, page_size=10)
+        self.assertEqual(len(result["listings"]), 20)
+        self.assertTrue(result["pagination"]["complete"])
+        self.assertNotIn("reportedTotal", result["pagination"])
+
+    def test_empty_envelope_with_count_is_not_empty(self):
+        # A display page can be empty while the board says roles remain. The
+        # crawl must not report a clean empty board (which can expire roles).
+        from network_jobs.pagination import paginate
+        fetch = self._fetch(lambda q: {"data": {"positions": [], "count": 25}})
+        result = paginate("https://x.io/api/jobs?start=0", fetch=fetch, max_pages=5)
+        pag = result["pagination"]
+        self.assertEqual(result["listings"], [])
+        self.assertEqual(pag["reportedTotal"], 25)
+        self.assertFalse(pag["complete"])
+        self.assertTrue(pag["truncated"])
+        self.assertEqual(pag["status"], "blocked")
+
+    def test_empty_envelope_with_meta_total_is_not_empty(self):
+        from network_jobs.pagination import paginate
+        fetch = self._fetch(lambda q: {"data": {
+            "positions": [], "meta": {"total": 25}}})
+        result = paginate("https://x.io/api/jobs?start=0", fetch=fetch, max_pages=5)
+        pag = result["pagination"]
+        self.assertEqual(pag["reportedTotal"], 25)
+        self.assertEqual(pag["status"], "blocked")
+        self.assertFalse(pag["complete"])
+
     def test_cap_on_envelope_board_is_truncated_not_complete(self):
         from network_jobs.pagination import paginate
         url = "https://jobs.example.com/api/pcsx/search?domain=example.com&query=&start=0"
