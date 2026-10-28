@@ -324,7 +324,7 @@ a tool change. Omit it when unknown rather than guessing.
 }
 ```
 
-Salary is `{ "min", "max" }` in annual USD with optional `"currency"` (default USD) and optional `"unit": "hourly"` — hourly rates are flagged, never annualized. String salaries (`"$150k–$180k"`, `"up to $200k"`, `"$75/hr"`) are parsed at ingest (`lib/network_jobs/salary.py`); dict salaries pass through. `postedAt` is canonicalized to `YYYY-MM-DD` at ingest when the ATS format parses, otherwise kept raw.
+Salary is `{ "min", "max" }` in annual USD with optional `"currency"` (default USD) and optional `"unit": "hourly"` — hourly rates are flagged, never annualized. String salaries (`"$150k–$180k"`, `"up to $200k"`, `"$75/hr"`) are parsed at ingest (`lib/network_jobs/salary.py`); dict salaries pass through. `postedAt` is canonicalized to `YYYY-MM-DD` at ingest when the ATS format parses, otherwise kept raw. Eightfold-style epoch timestamps are a source for it (#75): `postedTs` (preferred) and `creationTs` (fallback), in seconds or milliseconds, convert to `YYYY-MM-DD`; a real `postedAt` always wins, and a junk epoch with no valid fallback stays raw.
 
 `description` (optional free text, JD body truncated to ~10k chars, with `descriptionFetchedAt` / `descriptionSource`) rides through classify, merge, and shards untouched. mustHaves matches against it; embeddings include it when present. Rows without one are title-only and score structurally weaker — not incidentally, but because there are no requirements to match against. When a row's `sourceUrl` is Eightfold's `/api/pcsx/search`, `fetch-descriptions` uses the sibling `/api/pcsx/position_details` endpoint instead of the JS-rendered listing page; every other board keeps the page fetch.
 

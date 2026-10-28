@@ -55,6 +55,14 @@
   `positions` with a count is no longer called an empty board, and a count
   in an unrelated nested object (`data.facets.count`) is still ignored (#73).
 
+### Added
+- `skills/careers-discover/references/eightfold.md` documents the
+  Eightfold PCSX family: 10 rows per page with `start` offsets,
+  server-side `query`/`location` filters, `position_details`, the 429
+  behavior, and filter-first coverage guidance for huge boards (#71).
+  `skills/careers-discover/SKILL.md` now tells the agent to filter
+  first and quote coverage instead of silently crawling 150 of 20k.
+
 ## v1.9.0 — 2026-10-22
 
 ### Changed
