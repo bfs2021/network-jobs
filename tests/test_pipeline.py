@@ -1247,6 +1247,48 @@ class EnvelopeOffsetPaginationTests(unittest.TestCase):
                                                extract_job_list(beside), last_count=5))
 
 
+class SetQueryTests(unittest.TestCase):
+    """#77: page URLs must keep repeated query parameters."""
+
+    @staticmethod
+    def _pairs(url: str):
+        from urllib.parse import parse_qsl, urlsplit
+
+        return parse_qsl(urlsplit(url).query, keep_blank_values=True)
+
+    def test_repeated_parameters_survive_a_page_update(self):
+        from network_jobs.pagination import _set_query
+
+        url = "https://x.io/api/search?start=0&location=US&location=CA&filter=eng"
+        out = _set_query(url, start=10)
+        self.assertEqual(
+            self._pairs(out),
+            [("start", "10"), ("location", "US"), ("location", "CA"), ("filter", "eng")],
+        )
+
+    def test_target_key_is_replaced_once(self):
+        from network_jobs.pagination import _set_query
+
+        out = _set_query("https://x.io/api/search?start=0&start=5&q=a", start=20)
+        self.assertEqual(self._pairs(out), [("start", "20"), ("q", "a")])
+
+    def test_blank_values_and_fragment_are_preserved(self):
+        from urllib.parse import urlsplit
+
+        from network_jobs.pagination import _set_query
+
+        out = _set_query("https://x.io/api/search?filter=&q=a#frag", page=2)
+        self.assertEqual(self._pairs(out), [("filter", ""), ("q", "a"), ("page", "2")])
+        self.assertEqual(urlsplit(out).fragment, "frag")
+
+    def test_none_removes_every_occurrence(self):
+        from network_jobs.pagination import _set_query
+
+        out = _set_query("https://x.io/api/search?cursor=1&cursor=2&q=a", cursor=None)
+        self.assertEqual(self._pairs(out), [("q", "a")])
+        self.assertNotIn("cursor", out)
+
+
 class FingerprintExpiryTests(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="nj-fp-"))

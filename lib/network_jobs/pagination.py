@@ -433,13 +433,24 @@ def normalize_listing(raw: Any, source_url: str = "") -> dict[str, Any] | None:
 
 def _set_query(url: str, **updates: Any) -> str:
     parts = urlsplit(url)
-    q = dict(parse_qsl(parts.query, keep_blank_values=True))
-    for key, value in updates.items():
-        if value is None:
-            q.pop(key, None)
+    pairs = parse_qsl(parts.query, keep_blank_values=True)
+    replaced = {key: str(value) for key, value in updates.items() if value is not None}
+    removed = {key for key, value in updates.items() if value is None}
+    merged: list[tuple[str, str]] = []
+    written: set[str] = set()
+    for key, value in pairs:
+        if key in removed:
+            continue
+        if key in replaced:
+            # Keep the first position of the target key, drop any later copies.
+            merged.append((key, replaced.pop(key)))
+            written.add(key)
+        elif key in written:
+            continue
         else:
-            q[key] = str(value)
-    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(q), parts.fragment))
+            merged.append((key, value))
+    merged.extend(replaced.items())
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(merged), parts.fragment))
 
 
 def _absolute(base: str, maybe: str) -> str:

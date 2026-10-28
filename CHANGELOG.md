@@ -48,6 +48,11 @@
   page, and parses `{data: {jobDescription}}` (stripping HTML before the
   ~10k-char truncation). Other boards keep the page fetch; the schema,
   retry/backoff, and failure behavior are unchanged (#76).
+- `_set_query` preserves repeated query parameters when building the next
+  page URL. It previously rebuilt the query through a dict, so
+  `?location=US&location=CA` became `?location=CA` on page 2 and the
+  filter changed mid-crawl. The target key is replaced once in place;
+  other repeated/blank pairs and the fragment are kept (#77).
 - `paginate` now finds a board total one level deeper than the rows
   (Eightfold's `data.positions` plus `data.meta.total`) instead of only
   beside the list or at the top level. The total feeds `reportedTotal` and
