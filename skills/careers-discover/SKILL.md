@@ -86,6 +86,29 @@ python3 "$SUITE/skills/careers-discover/helpers/paginate-listings.py" \
      Follows `page` / `cursor` / `offset` / `links.next` generically. Writes `index/listings.json`, `index/pagination.json` (`pages`, `complete`, `truncated`, `status`), and one fetch-log metadata file **per page**. Cap `maxPages`.
 
      `status` is `complete` (clean crawl), `truncated` (page/listing cap hit), `empty` (clean, parsed board with zero roles), `blocked` (the fetch failed or nothing parseable came back — **not** “no openings”) or `captured` (a `paginate --input` run over a user-saved page — never the whole board). `complete` / `truncated` stay the source of truth for expiry and are unchanged; `status` is the readable headline. `--input` always records `complete: false` / `status: captured`. A crawl with zero incoming rows does **not** expire prior open roles at ingest unless the operator passes `--force-expire` — even if status is omitted or `null`.
+
+     **Huge boards: filter first, quote coverage (#71).** When a
+     board's reported total is much larger than the 15-page budget,
+     do not silently crawl a slice of it and present the slice as the
+     board. The standing example is Eightfold (see
+     [`references/eightfold.md`](references/eightfold.md)): 10 rows
+     per page, so 15 pages cover only 150 — Starbucks at 21,629 roles
+     would need ~2,163 requests unfiltered. Prefer a filtered URL
+     first (`query` / `location` where the API applies them
+     server-side), or ask the user **one question** before raising
+     `--max-pages` / `--max-listings`. Always quote coverage in the
+     handoff (`150 of 21,629`, plus the filter used) — a partial
+     count is never the whole board. The 15-page cap stays a hard
+     cap; no adaptive budget knob was added, because a budget that
+     quietly grows to thousands of requests is a rate-limit incident,
+     not a feature. Retry defaults for throttled boards (#70):
+     `fetch_json` retries 429/500/502/503/504 only, up to 3 attempts
+     total, honouring `Retry-After` capped at 60s per wait, otherwise
+     exponential backoff with jitter; other 4xx fail fast and a
+     persistent failure stays `blocked` / `complete: false`.
+     Until #69 lands, Eightfold `paginate` stops after one page (see
+     the recipe's status note) — use its curl + merged-capture path
+     and treat the result as partial, never complete.
    - Else parse visible listing cards / table rows (still write fetch-log before summarizing). If the board is gated and you cannot read it, stop here and use the user-capture handoff in [§3](#3-user-capture-the-default-for-gated-boards) — do not stage an empty board as success.
    - For each role capture: `title`, `url` (required), `location` and `locations[]` when shown, `department`, `externalId` if the JSON has an id, `salary` / `postedAt` only if shown, `sourceUrl`
    - Never invent ATS-specific parsers. If the helper truncates, `status` is `truncated`; if nothing parseable came back, `status` is `blocked`; if the board parses cleanly and lists zero roles, `status` is `empty`. Never pad rows from partial cards.
