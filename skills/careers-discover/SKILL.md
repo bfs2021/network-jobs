@@ -83,9 +83,9 @@ python3 "$SUITE/skills/careers-discover/helpers/paginate-listings.py" \
   --url "$JOBS_JSON_URL" --triage-dir "$TRIAGE" --company "$NAME" --max-pages 15
 ```
 
-     Follows `page` / `cursor` / `offset` / `links.next` generically. Writes `index/listings.json`, `index/pagination.json` (`pages`, `complete`, `truncated`, `status`), and one fetch-log metadata file **per page**. Cap `maxPages`.
+     Follows `page` / `cursor` / `offset` / `start` / `links.next` generically. Writes `index/listings.json`, `index/pagination.json` (`pages`, `complete`, `truncated`, `status`, plus `reportedTotal` / `rowsFetched` / `deduped` when the board reports a count), and one fetch-log metadata file **per page**. Cap `maxPages`.
 
-     `status` is `complete` (clean crawl), `truncated` (page/listing cap hit), `empty` (clean, parsed board with zero roles), `blocked` (the fetch failed or nothing parseable came back — **not** “no openings”) or `captured` (a `paginate --input` run over a user-saved page — never the whole board). `complete` / `truncated` stay the source of truth for expiry and are unchanged; `status` is the readable headline. `--input` always records `complete: false` / `status: captured`. A crawl with zero incoming rows does **not** expire prior open roles at ingest unless the operator passes `--force-expire` — even if status is omitted or `null`.
+     `status` is `complete` (clean crawl covering the board), `truncated` (a **partial** crawl: a page/listing cap was hit, it began mid-board, or it fetched fewer rows than the board reported), `empty` (clean, parsed board with zero roles), `blocked` (the fetch failed or nothing parseable came back — **not** “no openings”) or `captured` (a `paginate --input` run over a user-saved page — never the whole board). `complete` / `truncated` stay the source of truth for expiry; `status` is the readable headline. `--input` always records `complete: false` / `status: captured`. A crawl with zero incoming rows does **not** expire prior open roles at ingest unless the operator passes `--force-expire` — even if status is omitted or `null`. When `pagination.reportedTotal` is present, quote coverage (`nListings` of `reportedTotal`) and, if the board is much larger than what fit in the cap, offer a deeper run with `--max-pages` / `--max-listings` before calling it done.
    - Else parse visible listing cards / table rows (still write fetch-log before summarizing). If the board is gated and you cannot read it, stop here and use the user-capture handoff in [§3](#3-user-capture-the-default-for-gated-boards) — do not stage an empty board as success.
    - For each role capture: `title`, `url` (required), `location` and `locations[]` when shown, `department`, `externalId` if the JSON has an id, `salary` / `postedAt` only if shown, `sourceUrl`
    - Never invent ATS-specific parsers. If the helper truncates, `status` is `truncated`; if nothing parseable came back, `status` is `blocked`; if the board parses cleanly and lists zero roles, `status` is `empty`. Never pad rows from partial cards.
@@ -115,7 +115,7 @@ python3 "$SUITE/skills/careers-discover/helpers/crawl-state.py" \
   --triage-dir "$TRIAGE" --company "$NAME" --stamp --source-url "$JOBS_JSON_URL"
 ```
 
-Compares listing-set hash to `companies.json`. Caps: **15 API pages**, **5 browser load-more pages**, 2000 listings. Fetch-log metadata is written per page by paginate (default). If `unchanged: true`, say so and **skip ingest** (delta is empty) — do not expire anything. If the hash changed, ingest is a fingerprint merge (new/changed rows only; expiry still requires `pagination.complete`).
+Compares listing-set hash to `companies.json`. Caps: **15 API pages**, **5 browser load-more pages**, 2000 listings. A board serving 10 rows per page covers only 150 roles at the default cap; check `pagination.reportedTotal` and tell the user the coverage, then raise `--max-pages` / `--max-listings` for a real crawl if they want the rest. Fetch-log metadata is written per page by paginate (default). If `unchanged: true`, say so and **skip ingest** (delta is empty) — do not expire anything. If the hash changed, ingest is a fingerprint merge (new/changed rows only; expiry still requires `pagination.complete`).
 
 7. **Shortlist against prefs (required helper)**
 
@@ -311,7 +311,7 @@ concluding the tool is broken, and never retry the same wrong invocation.
 
 - [`helpers/stage-company.sh`](helpers/stage-company.sh) — create triage dir skeleton
 - [`helpers/fetch-page.sh`](helpers/fetch-page.sh) — curl page to fetch-log + stdout path
-- [`helpers/paginate-listings.py`](helpers/paginate-listings.py) — page/cursor/offset into `listings.json` + `pagination.json`
+- [`helpers/paginate-listings.py`](helpers/paginate-listings.py) — page/cursor/offset/start into `listings.json` + `pagination.json`
 - [`helpers/crawl-state.py`](helpers/crawl-state.py) — listing-set hash vs lastCrawl; `--stamp` after a successful extract
 - [`helpers/match-prefs.py`](helpers/match-prefs.py) — score listings vs `preferences.json` → `index/matches.json`
 - [`helpers/fetch-descriptions.py`](helpers/fetch-descriptions.py) — fill JD bodies for matches (`--company` optional)

@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- `careers-discover` called Eightfold-style boards (NVIDIA, UKG) **complete
+  after one page**, so a later `jobs-ingest` could expire every role the crawl
+  never fetched (#68). Those responses nest the rows and the total together
+  (`data.positions` / `data.count`) and page by a row-offset `start`, which
+  neither `detect_next`'s top-level total nor its page/offset branches saw. A
+  fallback now follows that envelope (and the same shape at the top level),
+  steps `start` by the rows the board returned, and replaces an invented
+  `offset=` when `start` is the board's only paging param; it still yields to
+  a link/cursor/page next page. `positionUrl` / `position_url` map to the
+  canonical listing URL, so NVIDIA rows no longer stage with `url: ""` (#69).
+- `complete` is now checked against the board, not inferred from "no next
+  page". A crawl that began mid-board (`page > 1`, `offset > 0`, or an envelope
+  `start > 0`) or fetched fewer raw rows than the board's `reportedTotal` is
+  `truncated`, so the expiry gate stays closed. `pagination.json` gains
+  `reportedTotal` / `rowsFetched` / `deduped` (the INVENTORY line prints
+  `reportedTotal`), and `jobs-ingest` uses `reportedTotal - deduped` for
+  `--expect-count` when it beats the staged listing count — a wrongly
+  `complete` crawl can no longer close roles it never saw.
+
 ## v1.9.0 — 2026-10-22
 
 ### Changed

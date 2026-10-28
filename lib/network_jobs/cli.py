@@ -1268,7 +1268,7 @@ def build_parser() -> argparse.ArgumentParser:
     rf.add_argument("--json", action="store_true", help="print a machine-readable summary")
     rf.set_defaults(func=cmd_refresh)
 
-    g = sub.add_parser("paginate", help="follow page/cursor/offset into listings.json")
+    g = sub.add_parser("paginate", help="follow page/cursor/offset/start into listings.json")
     g.add_argument("--url")
     g.add_argument("--input", help="local JSON file instead of fetching")
     g.add_argument("--triage-dir", required=True)
