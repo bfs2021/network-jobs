@@ -33,6 +33,11 @@
   steps use the raw rows served, and hitting `max_listings` exactly is not
   truncation when the board total is covered. A `truncated` status refuses
   expiry unless `--force-expire` is passed.
+- `paginate` now finds a board total one level deeper than the rows
+  (Eightfold's `data.positions` plus `data.meta.total`) instead of only
+  beside the list or at the top level. The total feeds `reportedTotal` and
+  the completeness gate, and the `start` fallback can follow it; a count in
+  an unrelated nested object (`data.facets.count`) is still ignored (#73).
 
 ## v1.9.0 — 2026-10-22
 

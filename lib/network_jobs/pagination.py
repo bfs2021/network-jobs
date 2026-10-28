@@ -403,6 +403,19 @@ def _count_value(obj: Any) -> int | None:
     return None
 
 
+def _meta_total(obj: Any) -> int | None:
+    """A `total`/`totalCount`/`totalFound` on a meta/pagination block."""
+    if not isinstance(obj, dict):
+        return None
+    for key in ("total", "totalCount", "totalFound"):
+        value = obj.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return int(value)
+        if isinstance(value, str) and value.strip().isdigit():
+            return int(value.strip())
+    return None
+
+
 def _top_level_total(payload: Any) -> int | None:
     """A board total on the payload or its meta block (detect_next's rule)."""
     total = _count_value(payload)
@@ -411,15 +424,9 @@ def _top_level_total(payload: Any) -> int | None:
     if not isinstance(payload, dict):
         return None
     for key in ("meta", "pagination"):
-        nested = payload.get(key)
-        if not isinstance(nested, dict):
-            continue
-        for name in ("total", "totalCount", "totalFound"):
-            value = nested.get(name)
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
-                return int(value)
-            if isinstance(value, str) and value.strip().isdigit():
-                return int(value.strip())
+        total = _meta_total(payload.get(key))
+        if total is not None:
+            return total
     return None
 
 
@@ -444,6 +451,67 @@ def envelope_total(payload: Any, rows: list[Any]) -> int | None:
     """The board's total when it sits beside the extracted rows, else None."""
     envelope = _rows_envelope(payload, rows)
     return _count_value(envelope) if envelope is not None else None
+
+
+def board_total(payload: Any, rows: list[Any]) -> int | None:
+    """The board's own count, including a meta block on the rows' container.
+
+    #69 trusted a total only when it sat beside the exact rows (identity) or
+    at the top level. Eightfold-style wrappers can also put it one level
+    deeper, beside the container (`data.positions` + `data.meta.total`); that
+    is still the board's envelope, not an unrelated sibling. A count inside an
+    unrelated nested object (e.g. `data.facets.count`) never speaks for the
+    rows.
+
+    Used for `reportedTotal` / the completeness gate, and by the `start`
+    fallback. It deliberately does not search arbitrary depth: the two-hop
+    shape (`data.payload.positions`) stays out of scope until a live board
+    needs it.
+    """
+    envelope = envelope_total(payload, rows)
+    if envelope is not None:
+        return envelope
+    if not rows:
+        # An empty display page can still carry the board's count. Find the
+        # empty job-list container so "empty board" is not claimed while the
+        # board says roles remain.
+        empty = _empty_rows_envelope(payload)
+        if empty is not None:
+            total = _count_value(empty)
+            if total is not None:
+                return total
+            for key in ("meta", "pagination"):
+                total = _meta_total(empty.get(key))
+                if total is not None:
+                    return total
+    container = _rows_envelope(payload, rows)
+    if container is not None:
+        for key in ("meta", "pagination"):
+            total = _meta_total(container.get(key))
+            if total is not None:
+                return total
+    return _top_level_total(payload)
+
+
+def _empty_rows_envelope(payload: Any) -> dict[str, Any] | None:
+    """The dict holding an empty list under a LIST_KEYS name, else None.
+
+    Used only when `extract_job_list` returned no rows, so a count beside an
+    empty `positions`/`jobs` is still visible. The caller still has to find a
+    total on it; an unrelated nested `count` never becomes a total here.
+    """
+    if not isinstance(payload, dict):
+        return None
+    for key in LIST_KEYS:
+        value = payload.get(key)
+        if isinstance(value, list) and not value:
+            return payload
+    for value in payload.values():
+        if isinstance(value, dict):
+            found = _empty_rows_envelope(value)
+            if found is not None:
+                return found
+    return None
 
 
 def _start_offset(url: str) -> int | None:
@@ -473,8 +541,9 @@ def detect_next_envelope(
     last_count: int,
 ) -> str | None:
     """Fallback for Eightfold-shaped boards (NVIDIA, UKG): rows and their total
-    sit together (`data.positions`, `data.count`, or at the top level) and the
-    URL pages by a digit-valued `start`. Returns the next URL or None.
+    sit together (`data.positions` / `data.count`), or the total is in a
+    `meta`/`pagination` block on the rows' container or at the top level, and
+    the URL pages by a digit-valued `start`. Returns the next URL or None.
 
     The step is the rows the board returned, not the normalized count: a row
     that fails normalization must not make the crawl re-read its neighbour.
@@ -486,7 +555,7 @@ def detect_next_envelope(
     start = _start_offset(url)
     if start is None:
         return None
-    total = envelope_total(payload, rows)
+    total = board_total(payload, rows)
     if total is None:
         return None
     next_start = start + len(rows)
@@ -640,7 +709,7 @@ def paginate(
     initial_page, initial_offset = page, offset
     raw_seen = 0
     reported_total: int | None = None
-    saw_envelope = False
+    saw_board_total = False
     seen_urls: set[str] = set()
     seen_fps: set[str] = set()
     fetch_log: list[dict[str, Any]] = []
@@ -671,10 +740,7 @@ def paginate(
 
         raw_jobs = extract_job_list(payload)
         raw_seen += len(raw_jobs)
-        env_total = envelope_total(payload, raw_jobs)
-        if env_total is not None:
-            saw_envelope = True
-        page_total = env_total if env_total is not None else _top_level_total(payload)
+        page_total = board_total(payload, raw_jobs)
         if page_total is not None:
             # Keep the largest total seen: a later page that reports a smaller
             # (page-scoped or stale) count must not lower the completeness bar.
@@ -682,6 +748,7 @@ def paginate(
                 page_total if reported_total is None
                 else max(reported_total, page_total)
             )
+            saw_board_total = True
         if not raw_jobs and parsed_empty_board(payload):
             empty_board = True
         page_listings = []
@@ -725,7 +792,7 @@ def paginate(
             fetched=len(listings), scheme=scheme,
         )
         start_at = _start_offset(current)
-        if found in {"offset", "page"} and start_at is not None and env_total is not None:
+        if found in {"offset", "page"} and start_at is not None and page_total is not None:
             # detect_next invented offset=/page= on a start-paged board (its
             # generic full-page fallback fires when the first page reaches
             # page_size). The board's own total is the paging contract, so
@@ -764,7 +831,7 @@ def paginate(
     started_mid_board = (
         initial_page > 1
         or initial_offset > 0
-        or (initial_start is not None and initial_start > 0 and saw_envelope)
+        or (initial_start is not None and initial_start > 0 and saw_board_total)
     )
     if complete and not truncated and (
         started_mid_board
@@ -772,7 +839,7 @@ def paginate(
     ):
         truncated = True
         complete = False
-    if scheme == "none" and saw_envelope and initial_start is not None:
+    if scheme == "none" and saw_board_total and initial_start is not None:
         # A one-page envelope board still paged by `start`; report the scheme.
         scheme = "start"
 
