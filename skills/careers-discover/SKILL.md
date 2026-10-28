@@ -83,9 +83,9 @@ python3 "$SUITE/skills/careers-discover/helpers/paginate-listings.py" \
   --url "$JOBS_JSON_URL" --triage-dir "$TRIAGE" --company "$NAME" --max-pages 15
 ```
 
-     Follows `page` / `cursor` / `offset` / `links.next` generically. Writes `index/listings.json`, `index/pagination.json` (`pages`, `complete`, `truncated`, `status`), and one fetch-log metadata file **per page**. Cap `maxPages`.
+     Follows `page` / `cursor` / `offset` / `start` / `links.next` generically. Writes `index/listings.json`, `index/pagination.json` (`pages`, `complete`, `truncated`, `status`, plus `reportedTotal` when the board reports a count and `rowsFetched` / `deduped` coverage), and one fetch-log metadata file **per page**. Cap `maxPages`.
 
-     `status` is `complete` (clean crawl), `truncated` (page/listing cap hit), `empty` (clean, parsed board with zero roles), `blocked` (the fetch failed or nothing parseable came back — **not** “no openings”) or `captured` (a `paginate --input` run over a user-saved page — never the whole board). `complete` / `truncated` stay the source of truth for expiry and are unchanged; `status` is the readable headline. `--input` always records `complete: false` / `status: captured`. A crawl with zero incoming rows does **not** expire prior open roles at ingest unless the operator passes `--force-expire` — even if status is omitted or `null`.
+     `status` is `complete` (clean crawl covering the board), `truncated` (a **partial** crawl: a page/listing cap was hit, it began mid-board, or it staged fewer unique roles than the board reported), `empty` (clean, parsed board with zero roles), `blocked` (the fetch failed or nothing parseable came back — **not** “no openings”) or `captured` (a `paginate --input` run over a user-saved page — never the whole board). `complete` / `truncated` stay the source of truth for expiry; `status` is the readable headline. `--input` always records `complete: false` / `status: captured`. A crawl with zero incoming rows does **not** expire prior open roles at ingest unless the operator passes `--force-expire` — even if status is omitted or `null`. When `pagination.reportedTotal` is present, quote coverage (`nListings` of `reportedTotal`) and, if the board is much larger than what fit in the cap, offer a deeper run with `--max-pages` / `--max-listings` before calling it done.
 
      **Huge boards: filter first, quote coverage (#71).** When a
      board's reported total is much larger than the 15-page budget,
@@ -106,9 +106,6 @@ python3 "$SUITE/skills/careers-discover/helpers/paginate-listings.py" \
      total, honouring `Retry-After` capped at 60s per wait, otherwise
      exponential backoff with jitter; other 4xx fail fast and a
      persistent failure stays `blocked` / `complete: false`.
-     Until #69 lands, Eightfold `paginate` stops after one page (see
-     the recipe's status note) — use its curl + merged-capture path
-     and treat the result as partial, never complete.
    - Else parse visible listing cards / table rows (still write fetch-log before summarizing). If the board is gated and you cannot read it, stop here and use the user-capture handoff in [§3](#3-user-capture-the-default-for-gated-boards) — do not stage an empty board as success.
    - For each role capture: `title`, `url` (required), `location` and `locations[]` when shown, `department`, `externalId` if the JSON has an id, `salary` / `postedAt` only if shown, `sourceUrl`
    - Never invent ATS-specific parsers. If the helper truncates, `status` is `truncated`; if nothing parseable came back, `status` is `blocked`; if the board parses cleanly and lists zero roles, `status` is `empty`. Never pad rows from partial cards.
