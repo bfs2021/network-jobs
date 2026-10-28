@@ -10,10 +10,8 @@ Failures never fail the run: undescribed jobs score exactly as before.
 from __future__ import annotations
 
 import json
-import math
 import time
 from datetime import datetime, timezone
-from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
@@ -22,6 +20,7 @@ from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 from .matches import MatchesFormatError, load_matches, write_matches
+from .retry import parse_retry_after as _parse_retry_after
 from .text import collapse_ws
 
 MAX_JD_CHARS = 10000
@@ -235,42 +234,14 @@ def _utcnow() -> str:
 def _retry_after_seconds(headers) -> float | None:
     """`Retry-After` as non-negative seconds, else None.
 
-    Both forms the header allows are accepted: delta-seconds (integer or
-    float) and an HTTP-date. The value is **not** capped here — the caller
-    decides whether a wait that long is acceptable (over `MAX_RETRY_AFTER`
-    we skip the retry instead of retrying early). A header the server sent
-    but we cannot parse is treated as absent, so the caller falls back to
-    exponential backoff.
+    Shared parsing lives in `network_jobs.retry` (#70); this wrapper
+    keeps the #64 call sites and tests unchanged. The value is **not**
+    capped here — the caller decides whether a wait that long is
+    acceptable (over `MAX_RETRY_AFTER` we skip the retry instead of
+    retrying early). A header the server sent but we cannot parse is
+    treated as absent, so the caller falls back to exponential backoff.
     """
-    if headers is None:
-        return None
-    try:
-        raw = headers.get("Retry-After")
-    except AttributeError:
-        return None
-    if raw is None:
-        return None
-    value = str(raw).strip()
-    if not value:
-        return None
-    try:
-        seconds = float(value)
-    except ValueError:
-        seconds = None
-    if seconds is not None:
-        if math.isnan(seconds) or math.isinf(seconds):
-            return None
-        return max(seconds, 0.0)
-    try:
-        when = parsedate_to_datetime(value)
-    except (TypeError, ValueError):
-        return None
-    if when is None:
-        return None
-    if when.tzinfo is None:
-        when = when.replace(tzinfo=timezone.utc)
-    delta = (when - datetime.now(timezone.utc)).total_seconds()
-    return max(delta, 0.0)
+    return _parse_retry_after(headers)
 
 
 def _is_bot_wall(headers) -> bool:
