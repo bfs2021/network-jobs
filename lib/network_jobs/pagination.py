@@ -7,15 +7,23 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 from .inventory import careers_url_from_listings, crawl_status, upsert_inventory, write_summary_json
 from .dates import normalize_date_iso
 from .fingerprint import fingerprint, plain_id
+from .retry import (
+    MAX_RETRY_AFTER_SECONDS,
+    is_retryable_status,
+    parse_retry_after,
+    retry_delay,
+)
 from .salary import parse_salary
 from .text import collapse_ws
 
@@ -70,7 +78,10 @@ _CONSUMED_KEYS = frozenset(
     for key in (
         TITLE_KEYS + URL_KEYS + LOC_KEYS + DEPT_KEYS + ID_KEYS
         + ("locations", "salary", "postedAt", "posted_at", "updated_at",
-           "updatedAt", "firstPublished", "publishedAt", "sourceUrl",
+           "updatedAt", "firstPublished", "publishedAt",
+           # Eightfold-style epoch timestamps (#75): consumed, not extras,
+           # so a staged row carries `postedAt` and not a raw alias beside it.
+           "postedTs", "creationTs", "sourceUrl",
            "matchScore")
     )
 )
@@ -256,16 +267,59 @@ def _merge_extras(listing: dict[str, Any], raw: dict[str, Any]) -> None:
         listing[key] = value
 
 
+POSTED_KEYS = (
+    "postedAt", "posted_at", "updated_at", "updatedAt",
+    "firstPublished", "publishedAt",
+)
+EPOCH_POSTED_KEYS = ("postedTs", "creationTs")
+
+
+def _posted_from(raw: dict[str, Any]) -> str | None:
+    """postedAt value for a raw row, in precedence order (#75).
+
+    A real posted key always wins and is returned verbatim (the caller
+    canonicalizes it). Otherwise `postedTs` is preferred and `creationTs`
+    is the fallback — but a candidate that converts to a date beats a
+    junk earlier candidate, so a garbage `postedTs` does not hide a valid
+    `creationTs`. A junk epoch with no valid fallback is kept raw, as
+    with any unparseable posted value. Booleans are not timestamps at
+    all (a bare `True` is epoch 1, not a posting date) and are skipped,
+    never converted and never kept.
+    """
+    posted = _first(raw, POSTED_KEYS)
+    if posted not in (None, ""):
+        return str(posted)
+    fallback_raw: str | None = None
+    for key in EPOCH_POSTED_KEYS:
+        value = _first(raw, (key,))
+        if value in (None, "") or isinstance(value, bool):
+            continue
+        converted = normalize_date_iso(value)
+        if converted:
+            return converted
+        if fallback_raw is None:
+            fallback_raw = str(value)
+    return fallback_raw
+
+
 def _normalize_salary_posted(listing: dict[str, Any]) -> None:
     """Parse string salaries and canonicalize postedAt, in place.
 
     postedAt becomes YYYY-MM-DD when the ATS format parses (raw kept when
     not); a string salary becomes the parsed dict when it parses. Anything
     unparseable is left untouched — never destroy data here.
+
+    A row with no postedAt but an Eightfold-style epoch timestamp gains
+    one here too (#75), via `_posted_from` — this covers the
+    already-staged path, where the mapping block below never runs.
     """
     posted = listing.get("postedAt")
     if posted:
         listing["postedAt"] = normalize_date_iso(posted) or str(posted)
+    else:
+        epoch_posted = _posted_from(listing)
+        if epoch_posted is not None:
+            listing["postedAt"] = epoch_posted
     salary = listing.get("salary")
     if isinstance(salary, dict) or not isinstance(salary, str) or not salary.strip():
         return
@@ -336,7 +390,7 @@ def normalize_listing(raw: Any, source_url: str = "") -> dict[str, Any] | None:
     ext = _id_from(raw)
     if isinstance(ext, (int, float)):
         ext = str(int(ext)) if float(ext).is_integer() else str(ext)
-    posted = _first(raw, ("postedAt", "posted_at", "updated_at", "updatedAt", "firstPublished", "publishedAt"))
+    posted = _posted_from(raw)
     salary = raw.get("salary")
     listing: dict[str, Any] = {
         "title": collapse_ws(str(title)),
@@ -613,16 +667,59 @@ def detect_next(
     return None, "none"
 
 
-def fetch_json(url: str, timeout: int = 60) -> tuple[Any, int, bytes]:
+DEFAULT_MAX_FETCH_ATTEMPTS = 3
+DEFAULT_FETCH_BASE_DELAY = 1.0
+
+
+def fetch_json(
+    url: str,
+    timeout: int = 60,
+    *,
+    max_attempts: int = DEFAULT_MAX_FETCH_ATTEMPTS,
+    base_delay: float = DEFAULT_FETCH_BASE_DELAY,
+    sleep=time.sleep,
+) -> tuple[Any, int, bytes]:
+    """Fetch one jobs JSON, retrying throttled / failing hosts (#70).
+
+    Retries 429, 500, 502, 503 and 504 only — never other 4xx, so a 403
+    bot wall or a 404 closed role fails fast on the first attempt. A
+    server `Retry-After` (delta-seconds or HTTP-date, parsed by the
+    shared `network_jobs.retry` helper) is honoured, capped at
+    `MAX_RETRY_AFTER_SECONDS` (60s) per wait; without one, exponential
+    backoff with jitter (`base_delay * 2**attempt` + jitter) applies.
+    Attempts are bounded at `max_attempts` total (default 3); a failure
+    that survives them still raises, so `cmd_paginate` records the
+    crawl as `blocked` / `complete: false` and ingest cannot expire on
+    it. `sleep` is injectable so tests stay instant, and normal 200s
+    behave exactly as before (no sleep, no extra request).
+    """
     req = Request(url, headers={"User-Agent": "Mozilla/5.0 (compatible; NetworkJobs/1.0)", "Accept": "application/json,text/plain,*/*"})
-    with urlopen(req, timeout=timeout) as resp:
-        body = resp.read()
-        status = getattr(resp, "status", 200) or 200
-    try:
-        payload = json.loads(body.decode("utf-8", errors="replace"))
-    except json.JSONDecodeError:
-        payload = None
-    return payload, int(status), body
+    attempt = 0
+    while True:
+        try:
+            with urlopen(req, timeout=timeout) as resp:
+                body = resp.read()
+                status = getattr(resp, "status", 200) or 200
+        except HTTPError as exc:
+            if not is_retryable_status(exc.code) or attempt + 1 >= max(1, int(max_attempts)):
+                raise
+            retry_after = parse_retry_after(getattr(exc, "headers", None))
+            try:
+                exc.close()
+            except Exception:
+                pass
+            sleep(retry_delay(
+                attempt=attempt, base_delay=base_delay,
+                retry_after=retry_after,
+                max_retry_after=MAX_RETRY_AFTER_SECONDS,
+            ))
+            attempt += 1
+            continue
+        try:
+            payload = json.loads(body.decode("utf-8", errors="replace"))
+        except json.JSONDecodeError:
+            payload = None
+        return payload, int(status), body
 
 
 def paginate(

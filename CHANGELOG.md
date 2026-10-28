@@ -26,13 +26,23 @@
   rows, so a re-sorting or duplicate-serving board cannot prove completeness
   with repeats; `deduped` is diagnostic only (it also includes normalization
   drops and cap overflow) and is never subtracted from `reportedTotal`. The
-  `start` fallback also replaces an invented `page=` (not just `offset=`),
-  keeps the largest total when later pages report a smaller one, prefers an
-  explicit `total`/`total_results` over a bare `count`, accepts digit-string
-  totals, and anchors a slashless `positionUrl` at the host root. Offset/page
-  steps use the raw rows served, and hitting `max_listings` exactly is not
-  truncation when the board total is covered. A `truncated` status refuses
-  expiry unless `--force-expire` is passed.
+  `start` fallback probes an invented `page=`/`offset=` first and only falls
+  back to `start` on a duplicate/empty page; it keeps the largest total when
+  later pages report a smaller one, prefers explicit totals over a bare
+  `count`, accepts digit-string totals, and anchors a slashless `positionUrl`
+  at the host root. Offset/page steps use the raw rows served; an exact
+  `max_listings`/`max_pages` board is complete when the total is covered, and
+  a `truncated` status refuses expiry unless `--force-expire` is passed.
+- `paginate` now retries throttled/failing JSON endpoints instead of
+  ending the crawl on the first 429/5xx (#70): 429, 500, 502, 503 and
+  504 only, at most 3 attempts, `Retry-After` (delta-seconds or
+  HTTP-date) capped at 60s per wait, otherwise exponential backoff with
+  jitter. Other 4xx fail fast, and a persistent failure still records
+  `blocked` / `complete: false`, so ingest cannot expire on it.
+- Eightfold-style `postedTs` / `creationTs` epoch timestamps now map to
+  `postedAt` (#75): seconds or milliseconds, a real `postedAt` wins, a
+  junk `postedTs` falls back to `creationTs`, and booleans/out-of-window
+  values are ignored instead of becoming 1970 dates.
 
 ## v1.9.0 — 2026-10-22
 

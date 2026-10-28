@@ -4563,6 +4563,284 @@ class PaginationNormalizeTests(unittest.TestCase):
             cli_mod.paginate = real_paginate
 
 
+class EpochPostedAtTests(unittest.TestCase):
+    """#75: Eightfold rows carry postedTs / creationTs as Unix epochs."""
+
+    def _row(self, **extra):
+        from network_jobs.pagination import normalize_listing
+
+        job = normalize_listing(
+            {"title": "Eng", "location": "Remote", **extra})
+        assert job is not None
+        return job
+
+    def test_posted_ts_seconds_and_millis(self):
+        # 1793145600 == 2026-10-28 UTC, in seconds and in milliseconds.
+        self.assertEqual(self._row(postedTs=1793145600)["postedAt"],
+                         "2026-10-28")
+        self.assertEqual(self._row(postedTs=1793145600000)["postedAt"],
+                         "2026-10-28")
+
+    def test_posted_ts_numeric_string(self):
+        self.assertEqual(self._row(postedTs="1793145600")["postedAt"],
+                         "2026-10-28")
+        self.assertEqual(self._row(postedTs="1793145600000")["postedAt"],
+                         "2026-10-28")
+
+    def test_creation_ts_is_fallback(self):
+        self.assertEqual(self._row(creationTs=1793145600)["postedAt"],
+                         "2026-10-28")
+        # postedTs wins when both convert.
+        self.assertEqual(
+            self._row(postedTs=1793145600,
+                      creationTs=1700000000)["postedAt"], "2026-10-28")
+
+    def test_junk_posted_ts_falls_back_to_creation_ts(self):
+        self.assertEqual(
+            self._row(postedTs="garbage",
+                      creationTs=1793145600)["postedAt"], "2026-10-28")
+
+    def test_real_posted_at_never_overridden(self):
+        self.assertEqual(
+            self._row(postedAt="2026-09-18",
+                      postedTs=1793145600)["postedAt"], "2026-09-18")
+
+    def test_junk_epoch_stays_raw(self):
+        self.assertEqual(self._row(postedTs="garbage")["postedAt"], "garbage")
+
+    def test_boolean_epoch_is_not_1970(self):
+        job = self._row(postedTs=True)
+        self.assertNotIn("postedAt", job)
+        # …but a valid creationTs still wins over a boolean postedTs.
+        self.assertEqual(
+            self._row(postedTs=True,
+                      creationTs=1793145600)["postedAt"], "2026-10-28")
+
+    def test_epoch_keys_are_consumed_not_extras(self):
+        job = self._row(postedTs=1793145600)
+        self.assertNotIn("postedTs", job)
+        self.assertNotIn("creationTs", job)
+
+    def test_dates_parse_epoch_and_reject_booleans(self):
+        from datetime import date
+
+        from network_jobs.dates import normalize_date_iso, parse_date_flexible
+
+        self.assertEqual(parse_date_flexible(1793145600), date(2026, 10, 28))
+        self.assertEqual(normalize_date_iso("1793145600000"), "2026-10-28")
+        self.assertIsNone(parse_date_flexible(True))
+        self.assertIsNone(parse_date_flexible(999999999999999))
+        # Existing formats are unchanged by the epoch branch.
+        self.assertEqual(normalize_date_iso("09/18/2026"), "2026-09-18")
+
+
+class PaginateRetryTests(unittest.TestCase):
+    """#70: bounded retry/backoff in pagination.fetch_json."""
+
+    def _http_error(self, code, headers=None):
+        import io
+        from urllib.error import HTTPError
+
+        return HTTPError("https://example.com/jobs", code, "error",
+                         headers or {}, io.BytesIO(b""))
+
+    def _run_fetch(self, script, **kwargs):
+        import network_jobs.pagination as pag_mod
+
+        calls = []
+        sleeps = []
+
+        def fake_urlopen(req, timeout=60):
+            calls.append(1)
+            action = script[len(calls) - 1]
+            if isinstance(action, Exception):
+                raise action
+            return action
+
+        class Resp:
+            def __init__(self, body):
+                self._body = body
+                self.status = 200
+
+            def read(self):
+                return self._body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        script = [s if isinstance(s, Exception) else Resp(s) for s in script]
+        real = pag_mod.urlopen
+        pag_mod.urlopen = fake_urlopen
+        try:
+            result = pag_mod.fetch_json(
+                "https://example.com/jobs", sleep=sleeps.append, **kwargs)
+        finally:
+            pag_mod.urlopen = real
+        return result, calls, sleeps
+
+    def test_fake_429_then_200_succeeds(self):
+        result, calls, sleeps = self._run_fetch([
+            self._http_error(429, {"Retry-After": "2"}),
+            json.dumps({"jobs": []}).encode(),
+        ])
+        self.assertEqual(result[1], 200)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(sleeps, [2.0])
+
+    def test_500_then_200_uses_backoff_not_retry_after(self):
+        result, calls, sleeps = self._run_fetch([
+            self._http_error(500),
+            json.dumps({"jobs": []}).encode(),
+        ])
+        self.assertEqual(result[1], 200)
+        self.assertEqual(len(calls), 2)
+        # base 1.0 * 2**0 + jitter in [0, 1.0).
+        self.assertGreaterEqual(sleeps[0], 1.0)
+        self.assertLess(sleeps[0], 2.0)
+
+    def _run_fetch_raising(self, script):
+        """Run fetch_json against a script, returning (calls, sleeps, exc)."""
+        import network_jobs.pagination as pag_mod
+
+        calls = []
+        sleeps = []
+        real = pag_mod.urlopen
+
+        def fake_urlopen(req, timeout=60):
+            calls.append(1)
+            raise script[len(calls) - 1]
+
+        pag_mod.urlopen = fake_urlopen
+        try:
+            pag_mod.fetch_json("https://example.com/jobs",
+                               sleep=sleeps.append)
+        except Exception as exc:  # noqa: BLE001 — the test asserts on it
+            return calls, sleeps, exc
+        finally:
+            pag_mod.urlopen = real
+        self.fail("fetch_json should have raised")
+
+    def test_403_is_not_retried(self):
+        calls, sleeps, exc = self._run_fetch_raising(
+            [self._http_error(403)])
+        self.assertEqual(exc.code, 403)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(sleeps, [])
+
+    def test_404_is_not_retried(self):
+        calls, sleeps, exc = self._run_fetch_raising(
+            [self._http_error(404)])
+        self.assertEqual(exc.code, 404)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(sleeps, [])
+
+    def test_retry_after_cap_is_60_and_attempts_bounded(self):
+        calls, sleeps, exc = self._run_fetch_raising(
+            [self._http_error(429, {"Retry-After": "120"})] * 3)
+        self.assertEqual(exc.code, 429)
+        self.assertEqual(len(calls), 3)  # max_attempts, not unbounded
+        self.assertEqual(sleeps, [60.0, 60.0])
+
+    def test_retry_after_http_date_is_honoured(self):
+        from datetime import datetime, timedelta, timezone
+
+        from network_jobs.retry import parse_retry_after
+
+        soon = (datetime.now(timezone.utc)
+                + timedelta(seconds=30)).strftime("%a, %d %b %Y %H:%M:%S GMT")
+        parsed = parse_retry_after({"Retry-After": soon})
+        assert parsed is not None
+        self.assertGreaterEqual(parsed, 25.0)
+        self.assertLessEqual(parsed, 30.0)
+
+    def test_paginate_recovers_from_first_request_429(self):
+        # End to end through paginate's default fetch_json: the first
+        # request is throttled (Microsoft PCSX answered 429 on the first
+        # request in #70), the retry succeeds, and the crawl completes.
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        from threading import Thread
+
+        from network_jobs.pagination import paginate
+
+        class Handler(BaseHTTPRequestHandler):
+            seen = 0
+
+            def log_message(self, fmt, *args):
+                return
+
+            def do_GET(self):
+                Handler.seen += 1
+                if Handler.seen == 1:
+                    body = b"slow down"
+                    self.send_response(429)
+                    self.send_header("Retry-After", "0")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                payload = json.dumps({"jobs": [{
+                    "title": "Engineer",
+                    "url": "https://example.com/jobs/1",
+                    "location": "Remote",
+                }], "total": 1}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        port = httpd.server_address[1]
+        thread = Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        try:
+            result = paginate(f"http://127.0.0.1:{port}/jobs",
+                              max_pages=5, page_size=50)
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+        self.assertTrue(result["pagination"]["complete"])
+        self.assertEqual(len(result["listings"]), 1)
+        self.assertEqual(result["listings"][0]["title"], "Engineer")
+
+    def test_persistent_429_still_blocked_via_cli(self):
+        # fetch_json raises after its bounded attempts; cmd_paginate
+        # converts that into the blocked result, never an expiry.
+        import io as _io
+        from contextlib import redirect_stdout
+
+        import network_jobs.pagination as pag_mod
+
+        real = pag_mod.fetch_json
+
+        def dead(url, timeout=60):
+            raise self._http_error(429)
+
+        pag_mod.fetch_json = dead
+        tmp = Path(tempfile.mkdtemp(prefix="nj-429-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        triage = tmp / "triage"
+        out = _io.StringIO()
+        try:
+            with redirect_stdout(out):
+                rc = helper_main(["paginate", "--url",
+                                  "https://example.com/jobs",
+                                  "--triage-dir", str(triage),
+                                  "--company", "Throttled Co"])
+        finally:
+            pag_mod.fetch_json = real
+        self.assertEqual(rc, 0)
+        self.assertEqual(json.loads(out.getvalue())["status"], "blocked")
+        pag = json.loads((triage / "index" / "pagination.json").read_text())
+        self.assertEqual(pag["status"], "blocked")
+        self.assertFalse(pag["complete"])
+        self.assertEqual(
+            json.loads((triage / "index" / "listings.json").read_text()), [])
+
+
 class CorpusMergeTests(unittest.TestCase):
     def test_inherits_last_seen_when_incoming_lacks_it(self):
         from network_jobs.corpus import merge_jobs
