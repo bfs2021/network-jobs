@@ -844,6 +844,28 @@ def cmd_paginate(args: argparse.Namespace) -> int:
     if not url and payload is None:
         print("paginate requires --url or --input", file=sys.stderr)
         return 1
+    # Request descriptor for POST/JSON-body boards (#74). A --body
+    # without --method implies POST; --input capture is unchanged —
+    # a saved page is never fetched, whatever descriptor is given.
+    body = None
+    if getattr(args, "body", None):
+        try:
+            body = json.loads(args.body)
+        except json.JSONDecodeError as exc:
+            print(f"paginate: --body is not valid JSON: {exc}", file=sys.stderr)
+            return 1
+        if not isinstance(body, dict):
+            print("paginate: --body must be a JSON object", file=sys.stderr)
+            return 1
+    headers = {}
+    for raw_header in getattr(args, "header", None) or []:
+        if ":" not in raw_header:
+            print(f"paginate: --header must be 'Name: value', got {raw_header!r}",
+                  file=sys.stderr)
+            return 1
+        name, value = raw_header.split(":", 1)
+        headers[name.strip()] = value.strip()
+    method = getattr(args, "method", None) or ("POST" if body is not None else "GET")
     try:
         result = paginate(
             url or None,
@@ -854,6 +876,10 @@ def cmd_paginate(args: argparse.Namespace) -> int:
             company=args.company or "",
             # `--input` is a user capture: one saved page, never a whole crawl.
             capture=bool(args.input and not url),
+            method=method,
+            headers=headers or None,
+            body=body,
+            body_offset_key=getattr(args, "body_offset_key", "offset") or "offset",
         )
     except OSError as exc:
         # Dead URL / refused connection: a readable `blocked` result beats a
@@ -1275,6 +1301,16 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--company", default="")
     g.add_argument("--max-pages", type=int, default=DEFAULT_MAX_PAGES)
     g.add_argument("--max-listings", type=int, default=DEFAULT_MAX_LISTINGS)
+    # Request descriptor for POST/JSON-body job APIs (#74, e.g. Workday
+    # CXS): --body is a JSON object, stepped by its offset key per page.
+    g.add_argument("--method", default=None,
+                   help="GET (default) or POST; a --body without --method implies POST")
+    g.add_argument("--body", default=None,
+                   help="JSON object sent as the request body (POST boards)")
+    g.add_argument("--header", action="append", default=None,
+                   help="extra request header 'Name: value' (repeatable)")
+    g.add_argument("--body-offset-key", default="offset",
+                   help="JSON body key stepped per POST page (default: offset)")
     g.set_defaults(func=cmd_paginate)
 
     b = sub.add_parser("rebuild", help="merge batch into corpus by fingerprint")

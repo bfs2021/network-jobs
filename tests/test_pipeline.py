@@ -4988,6 +4988,295 @@ class PaginateRetryTests(unittest.TestCase):
             json.loads((triage / "index" / "listings.json").read_text()), [])
 
 
+class PostPaginationTests(unittest.TestCase):
+    """#74: POST/JSON-body job APIs (Workday CXS shape) via paginate.
+
+    The server below is synthetic — no live Workday tenant is hit. Rows
+    are Workday-shaped (`total` + `jobPostings`, `externalPath`,
+    `locationsText`, `postedOn`) but the code under test is generic:
+    no Workday name appears in pagination.py, only the request
+    descriptor (method/headers/body) and the total + offset stepping.
+    """
+
+    ROWS = [
+        {"title": f"Role {i}", "externalPath": f"/job/{i}",
+         "locationsText": "Remote", "postedOn": "2026-10-20"}
+        for i in range(5)
+    ]
+
+    def _server(self, handler_cls):
+        from http.server import ThreadingHTTPServer
+        from threading import Thread
+
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
+        Thread(target=httpd.serve_forever, daemon=True).start()
+        self.addCleanup(httpd.shutdown)
+        return f"http://127.0.0.1:{httpd.server_address[1]}/wday/cxs/tenant/site/jobs"
+
+    def _workday_handler(self, seen, fail_first_with=None):
+        import json as _json
+        from http.server import BaseHTTPRequestHandler
+
+        rows = self.ROWS
+        fail = {"n": 0, "code": fail_first_with}
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):  # noqa: D102 - quiet test server
+                pass
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                body = _json.loads(self.rfile.read(length) or b"{}")
+                seen.append((self.command, body))
+                if fail["code"] is not None and fail["n"] == 0:
+                    fail["n"] += 1
+                    data = b"{}"
+                    self.send_response(fail["code"])
+                    self.send_header("Retry-After", "0")
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                    return
+                off = body.get("offset", 0)
+                lim = body.get("limit", 2)
+                data = _json.dumps(
+                    {"total": len(rows),
+                     "jobPostings": rows[off:off + lim]}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def do_GET(self):
+                seen.append((self.command, None))
+                self.send_response(405)
+                self.end_headers()
+
+        return Handler
+
+    def test_post_board_pages_to_completion_with_absolute_urls(self):
+        from network_jobs.pagination import paginate
+
+        seen = []
+        url = self._server(self._workday_handler(seen))
+        result = paginate(
+            url, method="POST",
+            body={"appliedFacets": {}, "limit": 2, "offset": 0,
+                  "searchText": ""})
+        self.assertEqual(len(result["listings"]), 5)
+        self.assertTrue(result["pagination"]["complete"])
+        self.assertEqual(result["pagination"]["scheme"], "offset")
+        self.assertEqual(result["pagination"]["pages"], 3)
+        self.assertEqual(
+            [r["url"] for r in result["listings"]],
+            [f"{url.rsplit('/wday/', 1)[0]}/job/{i}" for i in range(5)])
+        first = result["listings"][0]
+        self.assertEqual(first["location"], "Remote")
+        self.assertEqual(first["postedAt"], "2026-10-20")
+        self.assertNotIn("postedOn", first)
+        self.assertNotIn("externalPath", first)
+        # Offsets actually stepped 0, 2, 4 — and nothing else was sent.
+        self.assertEqual([b.get("offset") for _, b in seen], [0, 2, 4])
+        self.assertTrue(all(m == "POST" for m, _ in seen))
+        self.assertEqual(
+            [e["method"] for e in result["fetchLog"]],
+            ["POST", "POST", "POST"])
+
+    def test_post_board_truncates_at_max_pages(self):
+        from network_jobs.pagination import paginate
+
+        seen = []
+        url = self._server(self._workday_handler(seen))
+        result = paginate(
+            url, method="POST",
+            body={"appliedFacets": {}, "limit": 2, "offset": 0,
+                  "searchText": ""},
+            max_pages=2)
+        self.assertEqual(len(result["listings"]), 4)
+        self.assertFalse(result["pagination"]["complete"])
+        self.assertTrue(result["pagination"]["truncated"])
+        self.assertEqual(result["pagination"]["status"], "truncated")
+
+    def test_post_body_without_method_implies_post(self):
+        from network_jobs.pagination import paginate
+
+        seen = []
+        url = self._server(self._workday_handler(seen))
+        result = paginate(
+            url,
+            body={"appliedFacets": {}, "limit": 5, "offset": 0,
+                  "searchText": ""})
+        self.assertEqual(len(result["listings"]), 5)
+        self.assertTrue(all(m == "POST" for m, _ in seen))
+
+    def test_post_429_retries_through_the_shared_helper(self):
+        # The #70 retry path is transport, not method: a throttled
+        # first POST is retried with the same body, then succeeds.
+        import network_jobs.pagination as pag_mod
+
+        seen = []
+        url = self._server(self._workday_handler(seen, fail_first_with=429))
+        sleeps = []
+        result = pag_mod.fetch_json(
+            url, method="POST",
+            body={"appliedFacets": {}, "limit": 5, "offset": 0,
+                  "searchText": ""},
+            sleep=sleeps.append)
+        self.assertEqual(result[1], 200)
+        self.assertEqual(result[0]["total"], 5)
+        self.assertEqual(len(seen), 2)
+        self.assertEqual(sleeps, [0.0])
+
+    def test_post_without_total_does_not_invent_pages(self):
+        # A POST board that publishes no total is left as-is after its
+        # first page: paginate must not invent an offset body for it.
+        import json as _json
+        from http.server import BaseHTTPRequestHandler
+
+        seen = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):  # noqa: D102 - quiet test server
+                pass
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                seen.append(_json.loads(self.rfile.read(length) or b"{}"))
+                data = _json.dumps(
+                    {"jobPostings": self.__class__.rows}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+        Handler.rows = self.ROWS[:2]
+        from network_jobs.pagination import paginate
+
+        url = self._server(Handler)
+        result = paginate(
+            url, method="POST",
+            body={"appliedFacets": {}, "limit": 2, "offset": 0,
+                  "searchText": ""})
+        self.assertEqual(len(result["listings"]), 2)
+        self.assertEqual(len(seen), 1)
+        # One page with no total cannot prove coverage: partial, never done.
+        self.assertFalse(result["pagination"]["complete"])
+        self.assertTrue(result["pagination"]["truncated"])
+        self.assertEqual(result["pagination"]["status"], "truncated")
+
+    def test_get_request_is_unchanged(self):
+        # GET callers pass no descriptor: no body is sent, the method
+        # is GET, and the fetch log still records the old "curl" label.
+        import json as _json
+        from http.server import BaseHTTPRequestHandler
+
+        seen = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):  # noqa: D102 - quiet test server
+                pass
+
+            def do_GET(self):
+                seen.append((self.command, self.rfile.read(0)))
+                data = _json.dumps(
+                    {"jobs": [{"title": "Eng", "url": "https://example.com/j/1",
+                               "location": "Remote"}]}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+        from network_jobs.pagination import paginate
+
+        url = self._server(Handler)
+        result = paginate(url)
+        self.assertEqual(len(result["listings"]), 1)
+        self.assertEqual(seen, [("GET", b"")])
+        self.assertEqual(result["fetchLog"][0]["method"], "curl")
+
+    def test_external_path_mapping(self):
+        from network_jobs.pagination import normalize_listing
+
+        row = normalize_listing(
+            {"title": "Eng", "externalPath": "/en-US/job/abc"},
+            source_url="https://tenant.wd5.myworkdayjobs.com/wday/cxs/tenant/site/jobs")
+        assert row is not None
+        self.assertEqual(
+            row["url"],
+            "https://tenant.wd5.myworkdayjobs.com/en-US/job/abc")
+        self.assertNotIn("externalPath", row)
+        absolute = normalize_listing(
+            {"title": "Eng", "externalPath": "https://example.com/job/9"})
+        assert absolute is not None
+        self.assertEqual(absolute["url"], "https://example.com/job/9")
+        slashless = normalize_listing(
+            {"title": "Eng", "externalPath": "en-US/job/abc"},
+            source_url="https://tenant.wd5.myworkdayjobs.com/wday/cxs/tenant/site/jobs")
+        assert slashless is not None
+        self.assertEqual(
+            slashless["url"],
+            "https://tenant.wd5.myworkdayjobs.com/en-US/job/abc")
+
+    def test_paginate_cli_post_end_to_end(self):
+        import io
+        from contextlib import redirect_stdout
+
+        seen = []
+        url = self._server(self._workday_handler(seen))
+        tmp = Path(tempfile.mkdtemp(prefix="nj-post-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        triage = tmp / "triage"
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = helper_main([
+                "paginate", "--url", url, "--triage-dir", str(triage),
+                "--company", "Workday Co",
+                "--method", "POST",
+                "--body", '{"appliedFacets": {}, "limit": 2, "offset": 0, "searchText": ""}',
+            ])
+        self.assertEqual(rc, 0)
+        payload = json.loads(out.getvalue())
+        self.assertEqual(payload["status"], "complete")
+        self.assertTrue(payload["complete"])
+        listings = json.loads((triage / "index" / "listings.json").read_text())
+        self.assertEqual(len(listings), 5)
+        self.assertTrue(all(r["url"].startswith("http://127.0.0.1:")
+                           and r["url"].endswith(f"/job/{i}")
+                           for i, r in enumerate(listings)))
+
+    def test_paginate_input_capture_is_unchanged(self):
+        # --input never fetches, so a POST descriptor alongside it is
+        # inert: the capture still records captured / complete: false.
+        import io
+        from contextlib import redirect_stdout
+
+        tmp = Path(tempfile.mkdtemp(prefix="nj-post-input-"))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        capture = tmp / "page.json"
+        capture.write_text(json.dumps(
+            {"jobPostings": [{"title": "Eng", "externalPath": "/job/1",
+                              "locationsText": "Remote"}]}))
+        triage = tmp / "triage"
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = helper_main([
+                "paginate", "--input", str(capture),
+                "--triage-dir", str(triage), "--company", "Workday Co",
+                "--method", "POST",
+                "--body", '{"limit": 2, "offset": 0}',
+            ])
+        self.assertEqual(rc, 0)
+        payload = json.loads(out.getvalue())
+        self.assertEqual(payload["status"], "captured")
+        self.assertFalse(payload["complete"])
+        listings = json.loads((triage / "index" / "listings.json").read_text())
+        self.assertEqual(len(listings), 1)
+
+
 class CorpusMergeTests(unittest.TestCase):
     def test_inherits_last_seen_when_incoming_lacks_it(self):
         from network_jobs.corpus import merge_jobs
@@ -6805,7 +7094,9 @@ class SkillDocConsistencyTests(unittest.TestCase):
     # -v is documented nowhere and would have to precede the subcommand).
     HELPER_FLAGS = {
         "paginate-listings.py": {"--url", "--input", "--triage-dir", "--company",
-                                 "--max-pages", "--max-listings"},
+                                 "--max-pages", "--max-listings",
+                                 # #74: the POST request descriptor.
+                                 "--method", "--body"},
         "crawl-state.py": {"--triage-dir", "--listings", "--companies", "--data",
                            "--company", "--slug", "--stamp", "--source-url"},
         "match-prefs.py": {"--triage-dir", "--listings", "--prefs", "--resume",

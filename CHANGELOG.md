@@ -62,6 +62,12 @@
   behavior, and filter-first coverage guidance for huge boards (#71).
   `skills/careers-discover/SKILL.md` now tells the agent to filter
   first and quote coverage instead of silently crawling 150 of 20k.
+- `paginate` accepts a POST/JSON request descriptor (`--method POST
+  --body`, repeatable `--header`, `--body-offset-key`) for boards like
+  Workday CXS (#74). It steps the body's offset while the board's
+  `total` says rows remain, maps `externalPath` / `locationsText` /
+  `postedOn`, and sends POST through the same retry/backoff as GET.
+  A POST board with no total ends as `truncated`, never `complete`.
 
 ## v1.9.0 — 2026-10-22
 

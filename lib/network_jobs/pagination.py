@@ -40,11 +40,18 @@ TITLE_KEYS = ("title", "jobTitle", "job_title", "name", "text", "role")
 # outranks an absolute `jobUrl`/`job_url` (#49).
 URL_KEYS = (
     "url", "absolute_url", "absoluteUrl", "hostedUrl", "hosted_url",
-    "jobUrl", "job_url", "job_path", "positionUrl", "position_url",
+    "jobUrl", "job_url", "job_path",
+    "positionUrl", "position_url",
+    # Workday CXS rows carry a board-relative listing path (#74); it is
+    # absolutized against the crawled URL in normalize_listing, exactly
+    # like `job_path`, and never outranks an absolute link above it.
+    "externalPath",
     "applyUrl", "apply_url",
     "url_next_step", "urlNextStep", "gh_src",
 )
-LOC_KEYS = ("location", "jobLocation", "job_location", "workplace", "city")
+LOC_KEYS = ("location", "jobLocation", "job_location", "workplace", "city",
+            # Workday CXS `locationsText` (#74): a plain location string.
+            "locationsText")
 # First non-empty candidate wins. Precedence: a key literally named
 # "department" (Ashby, most custom APIs) beats the Greenhouse plural
 # "departments" list, which beats camel/snake spellings of departmentName,
@@ -81,7 +88,7 @@ _CONSUMED_KEYS = frozenset(
            "updatedAt", "firstPublished", "publishedAt",
            # Eightfold-style epoch timestamps (#75): consumed, not extras,
            # so a staged row carries `postedAt` and not a raw alias beside it.
-           "postedTs", "creationTs", "sourceUrl",
+           "postedTs", "creationTs", "postedOn", "sourceUrl",
            "matchScore")
     )
 )
@@ -270,6 +277,8 @@ def _merge_extras(listing: dict[str, Any], raw: dict[str, Any]) -> None:
 POSTED_KEYS = (
     "postedAt", "posted_at", "updated_at", "updatedAt",
     "firstPublished", "publishedAt",
+    # Workday CXS `postedOn` (#74): a posting date like any other here.
+    "postedOn",
 )
 EPOCH_POSTED_KEYS = ("postedTs", "creationTs")
 
@@ -368,10 +377,13 @@ def normalize_listing(raw: Any, source_url: str = "") -> dict[str, Any] | None:
     url = _url_from(raw)
     board_relative = raw.get("job_path")
     if not (isinstance(board_relative, str) and board_relative):
-        board_relative = raw.get("positionUrl") or raw.get("position_url")
+        board_relative = (
+            raw.get("positionUrl") or raw.get("position_url")
+            or raw.get("externalPath")
+        )
     if (isinstance(board_relative, str) and board_relative
             and url == collapse_ws(board_relative)
-            and not url.startswith("/")):
+            and not url.startswith(("/", "http://", "https://"))):
         url = "/" + url
     url = _absolute(source_url, url)
     loc_raw = None
@@ -746,6 +758,9 @@ def fetch_json(
     max_attempts: int = DEFAULT_MAX_FETCH_ATTEMPTS,
     base_delay: float = DEFAULT_FETCH_BASE_DELAY,
     sleep=time.sleep,
+    method: str = "GET",
+    headers: dict[str, str] | None = None,
+    body: Any = None,
 ) -> tuple[Any, int, bytes]:
     """Fetch one jobs JSON, retrying throttled / failing hosts (#70).
 
@@ -760,8 +775,27 @@ def fetch_json(
     crawl as `blocked` / `complete: false` and ingest cannot expire on
     it. `sleep` is injectable so tests stay instant, and normal 200s
     behave exactly as before (no sleep, no extra request).
+
+    `method` / `headers` / `body` are the request descriptor for
+    POST/JSON-body job APIs (#74, e.g. Workday CXS): a dict/list body
+    is sent as JSON with `Content-Type: application/json`, and the
+    retry/backoff above applies to POST exactly as to GET. A plain
+    GET call passes no method, headers or body and is byte-for-byte
+    the request it has always been.
     """
-    req = Request(url, headers={"User-Agent": "Mozilla/5.0 (compatible; NetworkJobs/1.0)", "Accept": "application/json,text/plain,*/*"})
+    req_headers = {"User-Agent": "Mozilla/5.0 (compatible; NetworkJobs/1.0)", "Accept": "application/json,text/plain,*/*"}
+    if headers:
+        req_headers.update(headers)
+    data = None
+    if body is not None:
+        if isinstance(body, (dict, list)):
+            data = json.dumps(body).encode("utf-8")
+            req_headers.setdefault("Content-Type", "application/json")
+        elif isinstance(body, bytes):
+            data = body
+        else:
+            data = str(body).encode("utf-8")
+    req = Request(url, headers=req_headers, data=data, method=method.upper())
     attempt = 0
     while True:
         try:
@@ -801,6 +835,10 @@ def paginate(
     source_url: str = "",
     company: str = "",
     capture: bool = False,
+    method: str = "GET",
+    headers: dict[str, str] | None = None,
+    body: dict[str, Any] | None = None,
+    body_offset_key: str = "offset",
 ) -> dict[str, Any]:
     """Follow pagination into a result dict.
 
@@ -812,8 +850,37 @@ def paginate(
     `capture=True` marks a `paginate --input` run: the rows came from a single
     page a human saved, so the run can never prove the board is complete. It
     always records `complete: false` / `status: "captured"` (#39).
+
+    POST/JSON-body boards (#74, e.g. Workday CXS) are a request
+    descriptor, not an adapter: pass `method="POST"` (a `body` without
+    an explicit method also implies POST) plus the initial JSON body,
+    and `paginate` steps the body's offset key (`body_offset_key`,
+    default `"offset"`) by `len(rows)` per page. Stepping is gated
+    purely on the shape — a known board total (`_board_total`) that the
+    fetched rows have not yet reached — never on a per-tenant field,
+    and `detect_next`'s URL logic is never consulted for POST pages,
+    so no offset query param is invented on a POST endpoint. The
+    fetch itself goes through `fetch_json`, so the #70 retry/backoff
+    applies to POST exactly as to GET. GET callers pass no descriptor
+    and behave exactly as before.
     """
+    post_mode = method.upper() != "GET" or body is not None
+    if post_mode and method.upper() == "GET":
+        method = "POST"
+    post_body: dict[str, Any] | None = None
+    if post_mode:
+        post_body = dict(body) if isinstance(body, dict) else {}
     fetch = fetch or fetch_json
+    if post_mode and fetch is fetch_json:
+        # The default fetcher reads the *current* body each page, so the
+        # offset the loop writes below is what the next request sends.
+        # A caller-supplied fetch owns its own request construction.
+        _default_fetch = fetch
+
+        def fetch_post(request_url: str, _fetch=_default_fetch, _body=post_body):
+            return _fetch(request_url, method=method, headers=headers, body=_body)
+
+        fetch = fetch_post
     listings: list[dict[str, Any]] = []
     pages = 0
     truncated = False
@@ -840,6 +907,15 @@ def paginate(
     # page=/offset= is followed; used only if that page comes back wholly
     # duplicated or empty (#69 review: don't hijack a working pager).
     start_fallback: tuple[str, int] | None = None
+    if post_mode and post_body is not None:
+        # The body's offset, when present and numeric, is the starting
+        # row; otherwise the crawl starts at row 0 and the key is added
+        # on the first request so every POST page carries it.
+        try:
+            offset = int(post_body.get(body_offset_key, 0))
+        except (TypeError, ValueError):
+            offset = 0
+        post_body[body_offset_key] = offset
     seen_urls: set[str] = set()
     seen_fps: set[str] = set()
     fetch_log: list[dict[str, Any]] = []
@@ -856,14 +932,17 @@ def paginate(
                 complete = False
             break
         if current:
-            if current in seen_urls:
+            # POST pages share one URL and differ only by body offset,
+            # so the dedup key includes it; GET dedup is unchanged.
+            seen_key = f"{current}#{offset}" if post_mode else current
+            if seen_key in seen_urls:
                 complete = True
                 break
-            seen_urls.add(current)
+            seen_urls.add(seen_key)
             payload, status, body = fetch(current)
             fetch_log.append({
                 "timestamp": _now(),
-                "method": "curl",
+                "method": method if post_mode else "curl",
                 "url": current,
                 "status": status,
                 "bytes": len(body or b""),
@@ -923,6 +1002,14 @@ def paginate(
             pending_start = False
         if page_listings and not new_listings:
             # Whole page was already seen — the "next" URL added nothing.
+            if post_mode:
+                # A duplicate POST page cannot prove the rest of the board.
+                if reported_total is not None and len(listings) >= reported_total:
+                    complete = True
+                else:
+                    truncated = True
+                    complete = False
+                break
             # If detect_next had invented page=/offset= on a start-paged
             # board, try the remembered start envelope before calling it done.
             if (start_fallback is not None
@@ -957,6 +1044,26 @@ def paginate(
         if not current:
             complete = True
             break
+        if post_mode:
+            # Shape-based POST stepping (#74): follow only while a
+            # known total says rows remain. With no total, or a
+            # short/empty page, the crawl ends as partial — never
+            # invent a next request body, and never let detect_next
+            # invent an offset query param on a POST endpoint.
+            total = board_total(payload, raw_jobs)
+            if total is None or last_count == 0 or len(listings) >= total:
+                if total is not None and len(listings) >= total:
+                    complete = True
+                else:
+                    truncated = True
+                    complete = False
+                break
+            offset = offset + last_count
+            if post_body is not None:
+                post_body[body_offset_key] = offset
+            scheme = "offset"
+            payload = None
+            continue
         if start_mode and start_at is not None:
             env_next = detect_next_envelope(
                 current, payload, raw_jobs, last_count=last_count,

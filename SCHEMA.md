@@ -207,6 +207,17 @@ the board provides one and the row lacks it.
 
 Written by `careers-discover/helpers/paginate-listings.py` when a jobs JSON/API is followed (page / cursor / offset, or `start` for boards whose rows and their count sit together — Eightfold's `data.positions` / `data.count` or `data.positions` / `data.meta.total`, or the same shape at the top level). Cap `maxPages` (default 15). ATS-agnostic — no adapter matrix.
 
+POST/JSON-body boards (#74, e.g. Workday CXS) use the same file with a
+request descriptor instead of a GET URL: `--method POST --body '{…}'`
+(a `--body` without `--method` implies POST). The helper steps the
+body's `offset` key by page size while the board's `total` says rows
+remain, records `scheme: "offset"`, and logs each page with
+`method: "POST"`; a board with no total is left after its first page.
+`externalPath` on a row is mapped to an absolute listing URL (host +
+path), `locationsText` to `location`, and `postedOn` to `postedAt`.
+GET boards are unchanged: no descriptor, no body, `method: "curl"`
+in the fetch log, and `--input` capture is never fetched.
+
 ```json
 {
   "pages": 4,
