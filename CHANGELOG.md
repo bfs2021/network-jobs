@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- `paginate` now retries throttled/failing JSON endpoints instead of
+  ending the crawl on the first 429/5xx (#70): 429, 500, 502, 503 and
+  504 only, at most 3 attempts, `Retry-After` (delta-seconds or
+  HTTP-date) capped at 60s per wait, otherwise exponential backoff with
+  jitter. Other 4xx fail fast, and a persistent failure still records
+  `blocked` / `complete: false`, so ingest cannot expire on it.
+- Eightfold-style `postedTs` / `creationTs` epoch timestamps now map to
+  `postedAt` (#75): seconds or milliseconds, a real `postedAt` wins, a
+  junk `postedTs` falls back to `creationTs`, and booleans/out-of-window
+  values are ignored instead of becoming 1970 dates.
+
 ## v1.9.0 — 2026-10-22
 
 ### Changed
