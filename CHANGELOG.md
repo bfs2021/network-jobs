@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- `fetch-descriptions` resolves Eightfold rows through the sibling
+  `/api/pcsx/position_details` endpoint instead of the JS-rendered listing
+  page, and parses `{data: {jobDescription}}` (stripping HTML before the
+  ~10k-char truncation). Other boards keep the page fetch; the schema,
+  retry/backoff, and failure behavior are unchanged (#76).
+
 ## v1.9.0 — 2026-10-22
 
 ### Changed
