@@ -1284,7 +1284,7 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--pagination-complete", action="store_true")
     b.add_argument("--pagination-incomplete", action="store_true")
     b.add_argument("--pagination-status", default=None,
-                   help="status from index/pagination.json: blocked/captured never expire")
+                   help="status from index/pagination.json: blocked/captured never expire; truncated unless --force-expire")
     b.add_argument("--expect-count", type=int, default=None,
                    help="board listing count: skip expiry when the batch is a strict subset (filtered ingest)")
     b.add_argument("--force-expire", action="store_true",

@@ -189,6 +189,17 @@ def merge_jobs(
             f"pagination status={pagination_status} is not evidence that roles "
             "closed (blocked = unreadable board, captured = user-saved page): "
             "expiry skipped")
+    elif (expire_company and pagination_status == "truncated"
+          and not force_expire):
+        # A truncated crawl is partial by definition (cap hit, mid-board
+        # start, or short of the board total). A model that passes
+        # --pagination-complete anyway must not open the expiry gate; an
+        # explicit force_expire still can.
+        info["expirySkipped"] = True
+        info["expiryReason"] = (
+            "pagination status=truncated is a partial crawl (page/listing "
+            "cap, mid-board start, or fewer roles than the board reported): "
+            "expiry skipped (pass --force-expire to override)")
     elif expire_company and pagination_complete:
         prior_open = _open_count_for_company(existing, expire_company)
         incoming_for_company = any(

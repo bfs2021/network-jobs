@@ -50,9 +50,9 @@ def crawl_status(pagination: Any, n_listings: Any) -> str:
     `blocked` means nothing parseable came back; `empty` means a clean, parsed
     board with zero rows (every role closed); `captured` means the rows came
     from a user save, not a crawl; `truncated` means the crawl is partial (a cap
-    was hit, it began mid-board, or it fetched fewer rows than the board
-    reported). Back-compat: `complete`/`truncated` stay the source of truth;
-    `status` is additive.
+    was hit, it began mid-board, or it staged fewer unique listings than the
+    board reported). Back-compat: `complete`/`truncated` stay the source of
+    truth; `status` is additive.
     """
     pages = pagination if isinstance(pagination, dict) else {}
     status = pages.get("status")

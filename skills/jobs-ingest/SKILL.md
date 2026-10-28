@@ -63,19 +63,17 @@ python3 "$SUITE/skills/jobs-ingest/helpers/classify-listings.py" \
    Fill `companyDomain` from the graph when known. Keep `salary` / `postedAt` only if present in triage.
 5. **Merge** into corpus via helper (required):
    - Write the **new/updated jobs only** to a working file (e.g. `$DATA/corpus/.work/batch.json`)
-   - Read `index/pagination.json` (or INVENTORY). Pass `--pagination-complete` **only** when `complete` is true **and** `status` is neither `blocked` nor `captured`, and **never** for a user-capture run (`status: captured`) — a blocked board captured zero rows because it could not be read, and a capture is one saved page, not the board; neither is evidence that roles closed. `status: truncated` behaves like `complete: false`. `status: empty` is a clean, parsed board listing zero roles (`complete` is true, so `--expect-count 0` works). If the batch has **zero incoming rows** for that company and it already had any open corpus rows, rebuild **skips expiry** and warns — whatever the status (omitted, jq `null`, or `empty`). A filtered or region-limited URL can look empty. Pass `--force-expire` only when the board really closed every role. A company that had zero open rows can still record empty.
+   - Read `index/pagination.json` (or INVENTORY). Pass `--pagination-complete` **only** when `complete` is true **and** `status` is neither `blocked` nor `captured`, and **never** for a user-capture run (`status: captured`) — a blocked board captured zero rows because it could not be read, and a capture is one saved page, not the board; neither is evidence that roles closed. `status: truncated` behaves like `complete: false`; the helper also refuses expiry on it unless `--force-expire` is passed. `status: empty` is a clean, parsed board listing zero roles (`complete` is true, so `--expect-count 0` works). If the batch has **zero incoming rows** for that company and it already had any open corpus rows, rebuild **skips expiry** and warns — whatever the status (omitted, jq `null`, or `empty`). A filtered or region-limited URL can look empty. Pass `--force-expire` only when the board really closed every role. A company that had zero open rows can still record empty.
    - Pass `--pagination-status "$(jq -r '.status' "$TRIAGE/index/pagination.json")"` with every rebuild: the helper refuses expiry on `blocked` / `captured` even if `--pagination-complete` slipped through.
-   - Always pass `--expect-count` with the board's own size: `max(index/listings.json length, pagination.reportedTotal - pagination.deduped)` when `reportedTotal` is present, else the listings length. The listing count alone is self-referential — a crawl wrongly marked complete and its subset guard come from the same short set — while the board's reported total makes the guard bite. A matches-only batch over a bigger board then **skips expiry loudly** instead of closing live roles; only `--force-expire` overrides (use when you know the board genuinely shrank).
+   - Always pass `--expect-count` with the board's own size: `max(index/listings.json length, pagination.reportedTotal)` when `reportedTotal` is present, else the listings length. The listing count alone is self-referential — a crawl wrongly marked complete and its subset guard come from the same short set — while the board's reported total makes the guard bite. Do **not** subtract `deduped`: it also includes rows that normalization dropped, so subtracting it can make a short crawl look complete. A matches-only batch over a bigger board then **skips expiry loudly** instead of closing live roles; only `--force-expire` overrides (use when you know the board genuinely shrank).
    - Run [`helpers/rebuild-corpus.sh`](helpers/rebuild-corpus.sh) on that file:
 
 ```bash
 N_LISTINGS=$(jq 'length' "$TRIAGE/index/listings.json")
 REPORTED=$(jq -r '.reportedTotal // empty' "$TRIAGE/index/pagination.json")
-DEDUPED=$(jq -r '.deduped // 0' "$TRIAGE/index/pagination.json")
 EXPECT="$N_LISTINGS"
-if [[ "$REPORTED" =~ ^[0-9]+$ ]]; then
-  BOARD=$((REPORTED - DEDUPED))
-  if (( BOARD > EXPECT )); then EXPECT="$BOARD"; fi
+if [[ "$REPORTED" =~ ^[0-9]+$ ]] && (( REPORTED > EXPECT )); then
+  EXPECT="$REPORTED"
 fi
 STATUS=$(jq -r '.status' "$TRIAGE/index/pagination.json")
 "$SUITE/skills/jobs-ingest/helpers/rebuild-corpus.sh" "$DATA/corpus/.work/batch.json" \
@@ -118,11 +116,9 @@ python3 "$SUITE/skills/jobs-ingest/helpers/classify-listings.py" \
 # After classifying (and optionally LLM-fixing needsLlm rows):
 N_LISTINGS=$(jq 'length' "$TRIAGE/index/listings.json")
 REPORTED=$(jq -r '.reportedTotal // empty' "$TRIAGE/index/pagination.json")
-DEDUPED=$(jq -r '.deduped // 0' "$TRIAGE/index/pagination.json")
 EXPECT="$N_LISTINGS"
-if [[ "$REPORTED" =~ ^[0-9]+$ ]]; then
-  BOARD=$((REPORTED - DEDUPED))
-  if (( BOARD > EXPECT )); then EXPECT="$BOARD"; fi
+if [[ "$REPORTED" =~ ^[0-9]+$ ]] && (( REPORTED > EXPECT )); then
+  EXPECT="$REPORTED"
 fi
 STATUS=$(jq -r '.status' "$TRIAGE/index/pagination.json")
 "$SUITE/skills/jobs-ingest/helpers/rebuild-corpus.sh" "$DATA/corpus/.work/batch.json" \

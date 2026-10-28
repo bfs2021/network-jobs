@@ -15,12 +15,24 @@
   canonical listing URL, so NVIDIA rows no longer stage with `url: ""` (#69).
 - `complete` is now checked against the board, not inferred from "no next
   page". A crawl that began mid-board (`page > 1`, `offset > 0`, or an envelope
-  `start > 0`) or fetched fewer raw rows than the board's `reportedTotal` is
-  `truncated`, so the expiry gate stays closed. `pagination.json` gains
-  `reportedTotal` / `rowsFetched` / `deduped` (the INVENTORY line prints
-  `reportedTotal`), and `jobs-ingest` uses `reportedTotal - deduped` for
-  `--expect-count` when it beats the staged listing count — a wrongly
-  `complete` crawl can no longer close roles it never saw.
+  `start > 0`) or staged fewer **unique** listings than the board's
+  `reportedTotal` is `truncated`, so the expiry gate stays closed.
+  `pagination.json` gains `reportedTotal` / `rowsFetched` / `deduped` (the
+  INVENTORY line prints `reportedTotal`), and `jobs-ingest` uses
+  `max(listings, reportedTotal)` for `--expect-count` when the total beats the
+  staged listing count — a wrongly `complete` crawl can no longer close roles
+  it never saw.
+- Review follow-up on #69: coverage counts unique staged listings, not raw
+  rows, so a re-sorting or duplicate-serving board cannot prove completeness
+  with repeats; `deduped` is diagnostic only (it also includes normalization
+  drops and cap overflow) and is never subtracted from `reportedTotal`. The
+  `start` fallback also replaces an invented `page=` (not just `offset=`),
+  keeps the largest total when later pages report a smaller one, prefers an
+  explicit `total`/`total_results` over a bare `count`, accepts digit-string
+  totals, and anchors a slashless `positionUrl` at the host root. Offset/page
+  steps use the raw rows served, and hitting `max_listings` exactly is not
+  truncation when the board total is covered. A `truncated` status refuses
+  expiry unless `--force-expire` is passed.
 
 ## v1.9.0 — 2026-10-22
 
