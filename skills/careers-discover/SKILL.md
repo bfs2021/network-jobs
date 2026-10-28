@@ -86,6 +86,30 @@ python3 "$SUITE/skills/careers-discover/helpers/paginate-listings.py" \
      Follows `page` / `cursor` / `offset` / `links.next` generically. Writes `index/listings.json`, `index/pagination.json` (`pages`, `complete`, `truncated`, `status`), and one fetch-log metadata file **per page**. Cap `maxPages`.
 
      `status` is `complete` (clean crawl), `truncated` (page/listing cap hit), `empty` (clean, parsed board with zero roles), `blocked` (the fetch failed or nothing parseable came back — **not** “no openings”) or `captured` (a `paginate --input` run over a user-saved page — never the whole board). `complete` / `truncated` stay the source of truth for expiry and are unchanged; `status` is the readable headline. `--input` always records `complete: false` / `status: captured`. A crawl with zero incoming rows does **not** expire prior open roles at ingest unless the operator passes `--force-expire` — even if status is omitted or `null`.
+
+     **POST/JSON-body boards (#74).** Some boards are POST, not GET —
+     Workday CXS is the pattern (see
+     [`references/workday.md`](references/workday.md)): the search
+     is `POST …/wday/cxs/{tenant}/{site}/jobs` with a JSON body
+     (`limit`, `offset`, `appliedFacets`, `searchText`) and returns
+     `{total, jobPostings}`. A GET to that endpoint returns nothing
+     useful, so do not conclude the board is empty. Use the helper's
+     request descriptor instead — a `--body` without `--method`
+     implies POST, and the helper steps the body's `offset` key by
+     page size while the board total says rows remain:
+
+```bash
+python3 "$SUITE/skills/careers-discover/helpers/paginate-listings.py" \
+  --url "$JOBS_JSON_URL" --triage-dir "$TRIAGE" --company "$NAME" \
+  --method POST --body '{"appliedFacets": {}, "limit": 20, "offset": 0, "searchText": ""}'
+```
+
+     Stepping is shape-based (`total` + `offset`/`limit`) with no
+     per-tenant adapter; `externalPath` is mapped to an absolute
+     listing URL, and the #70 retry/backoff applies to POST exactly
+     as to GET. A POST board that publishes no total is left after
+     its first page — never invent a next body for it. `--input`
+     capture is unchanged: a saved page is never fetched.
    - Else parse visible listing cards / table rows (still write fetch-log before summarizing). If the board is gated and you cannot read it, stop here and use the user-capture handoff in [§3](#3-user-capture-the-default-for-gated-boards) — do not stage an empty board as success.
    - For each role capture: `title`, `url` (required), `location` and `locations[]` when shown, `department`, `externalId` if the JSON has an id, `salary` / `postedAt` only if shown, `sourceUrl`
    - Never invent ATS-specific parsers. If the helper truncates, `status` is `truncated`; if nothing parseable came back, `status` is `blocked`; if the board parses cleanly and lists zero roles, `status` is `empty`. Never pad rows from partial cards.
