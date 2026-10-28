@@ -119,7 +119,10 @@ def merge_jobs(
     `pagination_status` is the crawl headline from `index/pagination.json`.
     `blocked` (unreadable board) and `captured` (user-saved page) can never
     expire, even with `pagination_complete` set — the flag is model-supplied,
-    the status is written by the helper (#39). A sudden drop to zero incoming
+    the status is written by the helper (#39). `truncated` is a partial crawl
+    and is refused unless `force_expire` is set; it only fires when the caller
+    passed `pagination_complete`, so the normal `--pagination-incomplete` path
+    stays a silent no-op. A sudden drop to zero incoming
     rows for that company, with N>0 prior open roles, is skipped unless
     `force_expire` is set — regardless of status (omitted, the jq string
     "null", or `empty`). A filtered or region-limited crawl URL can look
@@ -189,6 +192,17 @@ def merge_jobs(
             f"pagination status={pagination_status} is not evidence that roles "
             "closed (blocked = unreadable board, captured = user-saved page): "
             "expiry skipped")
+    elif (expire_company and pagination_status == "truncated"
+          and pagination_complete and not force_expire):
+        # A model that passes --pagination-complete anyway must not open the
+        # expiry gate for a partial crawl. The normal truncated path uses
+        # --pagination-incomplete and is already a no-op below; an explicit
+        # force_expire still can expire.
+        info["expirySkipped"] = True
+        info["expiryReason"] = (
+            "pagination status=truncated is a partial crawl (page/listing "
+            "cap, mid-board start, or fewer roles than the board reported): "
+            "expiry skipped (pass --force-expire to override)")
     elif expire_company and pagination_complete:
         prior_open = _open_count_for_company(existing, expire_company)
         incoming_for_company = any(

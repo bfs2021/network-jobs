@@ -205,7 +205,7 @@ the board provides one and the row lacks it.
 
 ### index/pagination.json
 
-Written by `careers-discover/helpers/paginate-listings.py` when a jobs JSON/API is followed (page / cursor / offset). Cap `maxPages` (default 15). ATS-agnostic — no adapter matrix.
+Written by `careers-discover/helpers/paginate-listings.py` when a jobs JSON/API is followed (page / cursor / offset, or `start` for boards whose rows and their count sit together — Eightfold's `data.positions` / `data.count`, or the same shape at the top level). Cap `maxPages` (default 15). ATS-agnostic — no adapter matrix.
 
 ```json
 {
@@ -214,11 +214,18 @@ Written by `careers-discover/helpers/paginate-listings.py` when a jobs JSON/API 
   "truncated": false,
   "scheme": "link",
   "maxPages": 15,
-  "status": "complete"
+  "status": "complete",
+  "reportedTotal": 120,
+  "rowsFetched": 124,
+  "deduped": 4
 }
 ```
 
-`status` is `complete` (clean crawl), `truncated` (page/listing cap hit with rows captured), `empty` (clean, parsed board with **zero** roles), `blocked` (the fetch failed or nothing parseable came back — **not** “no openings”) or `captured` (a `paginate --input` run over a user-saved page — never the whole board). It is additive: `complete` / `truncated` keep their existing meaning and remain the rule for expiry. Also copied into the INVENTORY `Pagination:` line and surfaced as the header `Status:` field. **`complete` is false** when the cap truncated the crawl, a next-page signal remained, the board could not be read (a dead URL writes `blocked` with zero rows), or the rows came from a user capture (`captured`). Ingest must **not** expire unseen jobs unless `complete` is true **and** `status` is neither `blocked` nor `captured`. If the batch has **zero incoming rows** for that company and the company already had any open roles, ingest **skips expiry** and warns — whatever the status (omitted, the jq string `null` from an older `pagination.json`, or `empty`). A filtered or region-limited crawl URL can look empty and would otherwise wipe the company. Pass `--force-expire` only when the board really closed every role. A company that had zero open rows can still record empty.
+`scheme` is the paging strategy that produced the last next page: `page`, `cursor`, `offset`, `link`, `start` or `none`. A one-page start-paged board can still report `start`. `reportedTotal` and `deduped` are present only when known/positive; `rowsFetched` is always written.
+
+`status` is `complete` (clean crawl covering the board), `truncated` (a **partial** crawl: a page/listing cap was hit before the board total was covered, it began mid-board, or it staged fewer unique roles than the board reported), `empty` (clean, parsed board with **zero** roles), `blocked` (the fetch failed or nothing parseable came back — **not** “no openings”) or `captured` (a `paginate --input` run over a user-saved page — never the whole board). It is additive: `complete` / `truncated` keep their existing meaning and remain the rule for expiry. Also copied into the INVENTORY `Pagination:` line and surfaced as the header `Status:` field. **`complete` is false** when the cap truncated the crawl before the board total was covered, a next-page signal remained, the board could not be read (a dead URL writes `blocked` with zero rows), the rows came from a user capture (`captured`), the crawl began beyond the first row/page (`offset > 0`, `page > 1`, or an envelope `start > 0`), or it staged fewer **unique** listings than the board's reported total. Ingest must **not** expire unseen jobs unless `complete` is true **and** `status` is neither `blocked`, `captured`, nor `truncated`; `truncated` is partial and the helper refuses it unless `--force-expire` is passed. If the batch has **zero incoming rows** for that company and the company already had any open roles, ingest **skips expiry** and warns — whatever the status (omitted, the jq string `null` from an older `pagination.json`, or `empty`). A filtered or region-limited crawl URL can look empty and would otherwise wipe the company. Pass `--force-expire` only when the board really closed every role. A company that had zero open rows can still record empty.
+
+Coverage fields sit beside `status`: `reportedTotal` is the count the board itself reported when present (read beside the rows, or at the top level / a top-level `meta` block); `rowsFetched` is the raw rows served across pages before fingerprint dedupe; `deduped` is `rowsFetched - listings` when positive. `deduped` is diagnostic only — it includes rows that normalization dropped and listings cut by the cap, so never subtract it from the board total. `reportedTotal` is appended to the INVENTORY `Pagination:` line. Feed ingest `--expect-count` from `max(listings, reportedTotal)` when the total is larger than the listing count: the listing length alone is self-referential, while the board's own total makes the subset guard bite if a crawl was wrongly marked complete.
 
 ### index/matches.json
 
@@ -323,7 +330,7 @@ Salary is `{ "min", "max" }` in annual USD with optional `"currency"` (default U
 
 Identity is **`fingerprint`**, not URL: `id:{atsId}` when `externalId` is known, otherwise `fp:{sha1(company+title+locations)}` (company from job data, not CLI flag — see #25). Placeholder ATS ids (`null`, `n/a`, `unknown`, `tbd`, `-`, plus prose label-leaks like `See Opening ID`) are treated as absent so distinct jobs never collide on a shared placeholder. The full set lives in `PLACEHOLDER_ATS_IDS` (`lib/network_jobs/fingerprint.py`). Rebuild merges on fingerprint: incoming wins, but `firstSeen` is preserved, `lastSeen` is inherited from the previous record when the incoming batch lacks it (a batch without `lastSeen` is not evidence the job was seen today), and a previous `postedAt` is kept when incoming lacks one. If an incoming job's `externalId` matches an existing entry under a different fingerprint, the entries are merged and a `driftWarnings` entry is emitted (prevents silent duplication from historical `--company` flag inconsistency). `status` is `open` | `closed`. Closed jobs stay in `jobs-all.json` but are omitted from searchable shards.
 
-**Expiry / close:** when ingesting a company, unseen open jobs for that company are marked `closed` **only if** triage `pagination.complete` is true. Incomplete crawls (truncated, cap hit, missing next page) must not expire anything.
+**Expiry / close:** when ingesting a company, unseen open jobs for that company are marked `closed` **only if** triage `pagination.complete` is true **and** `pagination.status` is not `truncated`, `blocked`, or `captured`. Incomplete crawls (truncated, cap hit, missing next page) must not expire anything; `truncated` is refused unless `--force-expire` is passed.
 
 ### Categories (15)
 

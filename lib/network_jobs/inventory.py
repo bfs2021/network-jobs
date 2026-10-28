@@ -49,8 +49,10 @@ def crawl_status(pagination: Any, n_listings: Any) -> str:
 
     `blocked` means nothing parseable came back; `empty` means a clean, parsed
     board with zero rows (every role closed); `captured` means the rows came
-    from a user save, not a crawl. Back-compat: `complete`/`truncated` stay the
-    source of truth; `status` is additive.
+    from a user save, not a crawl; `truncated` means the crawl is partial (a cap
+    was hit, it began mid-board, or it staged fewer unique listings than the
+    board reported). Back-compat: `complete`/`truncated` stay the source of
+    truth; `status` is additive.
     """
     pages = pagination if isinstance(pagination, dict) else {}
     status = pages.get("status")
@@ -67,12 +69,15 @@ def crawl_status(pagination: Any, n_listings: Any) -> str:
 def pagination_line(pages: Any, n_listings: Any = None) -> str:
     """The `Pagination:` line shared by the INVENTORY header and summary block."""
     pag = pages if isinstance(pages, dict) else {}
-    return (
+    line = (
         f"pages={pag.get('pages', 0)}, "
         f"complete={'true' if pag.get('complete') else 'false'}, "
         f"truncated={'true' if pag.get('truncated') else 'false'}, "
         f"status={crawl_status(pag, n_listings)}"
     )
+    if pag.get("reportedTotal") is not None:
+        line += f", reportedTotal={pag['reportedTotal']}"
+    return line
 
 
 def _header_values(summary: dict[str, Any]) -> dict[str, str]:

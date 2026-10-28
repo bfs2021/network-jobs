@@ -1,4 +1,4 @@
-"""ATS-agnostic pagination: follow page / cursor / offset into listings.json.
+"""ATS-agnostic pagination: follow page / cursor / offset / start into listings.json.
 
 No adapter matrix. Detect next-page signals on whatever JSON the site returns.
 """
@@ -32,7 +32,8 @@ TITLE_KEYS = ("title", "jobTitle", "job_title", "name", "text", "role")
 # outranks an absolute `jobUrl`/`job_url` (#49).
 URL_KEYS = (
     "url", "absolute_url", "absoluteUrl", "hostedUrl", "hosted_url",
-    "jobUrl", "job_url", "job_path", "applyUrl", "apply_url",
+    "jobUrl", "job_url", "job_path", "positionUrl", "position_url",
+    "applyUrl", "apply_url",
     "url_next_step", "urlNextStep", "gh_src",
 )
 LOC_KEYS = ("location", "jobLocation", "job_location", "workplace", "city")
@@ -58,6 +59,7 @@ ID_KEYS = (
 )
 NEXT_KEYS = ("next", "nextPage", "next_page", "nextUrl", "next_url")
 CURSOR_KEYS = ("nextCursor", "next_cursor", "cursor", "pageId", "page_id", "continuationToken")
+TOTAL_KEYS = ("total", "totalFound", "totalCount", "total_results", "count")
 
 # Keys the mapping block reads (case-insensitively) into canonical fields, plus
 # the canonical field names themselves. Everything else on an ATS row is an
@@ -304,14 +306,17 @@ def normalize_listing(raw: Any, source_url: str = "") -> dict[str, Any] | None:
     title = _first(raw, TITLE_KEYS)
     if not title:
         return None
-    # Boards may emit a board-relative canonical page (`job_path`, Amazon);
-    # resolve it against the crawled URL so staged rows always carry an
-    # absolute link (#48). A value without a leading slash would otherwise
-    # resolve under the search path (`/en/en/jobs/…`), so anchor it at the
-    # host root (#49).
+    # Boards may emit a board-relative canonical page (`job_path` for Amazon,
+    # `positionUrl` for Eightfold); resolve it against the crawled URL so
+    # staged rows always carry an absolute link (#48). A value without a
+    # leading slash would otherwise resolve under the search path
+    # (`/en/en/jobs/…`), so anchor it at the host root (#49).
     url = _url_from(raw)
-    job_path = raw.get("job_path")
-    if (isinstance(job_path, str) and job_path and url == collapse_ws(job_path)
+    board_relative = raw.get("job_path")
+    if not (isinstance(board_relative, str) and board_relative):
+        board_relative = raw.get("positionUrl") or raw.get("position_url")
+    if (isinstance(board_relative, str) and board_relative
+            and url == collapse_ws(board_relative)
             and not url.startswith("/")):
         url = "/" + url
     url = _absolute(source_url, url)
@@ -379,6 +384,145 @@ def _absolute(base: str, maybe: str) -> str:
     return urljoin(base, maybe)
 
 
+def _numeric_total(value: Any) -> int | None:
+    """A numeric total, accepting digit strings; booleans and junk are not."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if text.isascii() and text.isdigit():
+            return int(text)
+    return None
+
+
+def _count_value(obj: Any) -> int | None:
+    """The first numeric total on `obj`, or None. Booleans are not counts.
+
+    Digit strings are accepted because a few APIs send `"count": "100"`.
+    A bare `count` sorts last: it is the most ambiguous key (page size, facet
+    count, row total), so an explicit `total`/`total_results` wins when both
+    are present.
+    """
+    if not isinstance(obj, dict):
+        return None
+    for key in TOTAL_KEYS:
+        total = _numeric_total(obj.get(key))
+        if total is not None:
+            return total
+    return None
+
+
+def _top_level_total(payload: Any) -> int | None:
+    """A board total on the payload or its meta block (detect_next's rule).
+
+    Explicit totals anywhere beat a bare `count`, and the largest explicit
+    total wins across the payload/meta. A `count` on the payload is the last
+    resort because it is frequently a page size or facet count. This also
+    keeps a digit-string `count` from shadowing a real `meta.total`.
+    """
+    if not isinstance(payload, dict):
+        return None
+    explicit: list[int] = []
+    for key in ("total", "totalFound", "totalCount", "total_results"):
+        total = _numeric_total(payload.get(key))
+        if total is not None:
+            explicit.append(total)
+    for key in ("meta", "pagination"):
+        nested = payload.get(key)
+        if isinstance(nested, dict):
+            for name in ("total", "totalCount", "totalFound"):
+                total = _numeric_total(nested.get(name))
+                if total is not None:
+                    explicit.append(total)
+    if explicit:
+        return max(explicit)
+    return _numeric_total(payload.get("count"))
+
+
+def _rows_envelope(payload: Any, rows: list[Any]) -> dict[str, Any] | None:
+    """The dict that holds exactly `rows` (NVIDIA: `data`), else None.
+
+    Identity, not shape: the list must be the one extract_job_list returned, so
+    a count in some other envelope never speaks for these rows. The payload
+    itself counts when the rows sit directly on it (`{positions, count}`).
+    """
+    if not isinstance(payload, dict) or not rows:
+        return None
+    if any(value is rows for value in payload.values()):
+        return payload
+    for value in payload.values():
+        if isinstance(value, dict) and any(nested is rows for nested in value.values()):
+            return value
+    return None
+
+
+def envelope_total(payload: Any, rows: list[Any]) -> int | None:
+    """The board's total when it sits beside the extracted rows, else None."""
+    envelope = _rows_envelope(payload, rows)
+    return _count_value(envelope) if envelope is not None else None
+
+
+def _start_offset(url: str) -> int | None:
+    """The digit-valued `start` of a start-paged URL, else None.
+
+    None when the URL already pages by a real `page`/`pageNumber`/`offset`:
+    those params stay detect_next's, and `start` may just be a filter there.
+    Blank and zero values are decoys, not paging params.
+    """
+    q = dict(parse_qsl(urlsplit(url).query, keep_blank_values=True))
+
+    def zeroish(value: str) -> bool:
+        text = value.strip()
+        return text == "" or (text.isascii() and text.isdigit() and int(text) == 0)
+
+    if not zeroish(q.get("page", "")):
+        return None
+    if not zeroish(q.get("pageNumber", "")):
+        return None
+    if not zeroish(q.get("offset", "")):
+        return None
+    start = q.get("start", "")
+    return int(start) if start.isdigit() else None
+
+
+def detect_next_envelope(
+    url: str,
+    payload: Any,
+    rows: list[Any],
+    *,
+    last_count: int,
+) -> str | None:
+    """Fallback for Eightfold-shaped boards (NVIDIA, UKG): rows and their total
+    sit together (`data.positions`, `data.count`, or at the top level) and the
+    URL pages by a digit-valued `start`. Returns the next URL or None.
+
+    The step is the rows the board returned, not the normalized count: a row
+    that fails normalization must not make the crawl re-read its neighbour.
+    The paginate loop calls this after detect_next, and also uses it to
+    replace an invented `offset=` on a start-paged board.
+    """
+    if last_count == 0 or not rows:
+        return None
+    start = _start_offset(url)
+    if start is None:
+        return None
+    total_candidates = [
+        total for total in (
+            envelope_total(payload, rows),
+            _top_level_total(payload),
+        ) if total is not None
+    ]
+    if not total_candidates:
+        return None
+    total = max(total_candidates)
+    next_start = start + len(rows)
+    if next_start >= total:
+        return None
+    return _set_query(url, start=next_start)
+
+
 def detect_next(
     url: str,
     payload: Any,
@@ -390,7 +534,8 @@ def detect_next(
     fetched: int,
     scheme: str = "none",
 ) -> tuple[str | None, str]:
-    """Return (next_url, scheme). scheme is page|cursor|offset|link|none."""
+    """Return (next_url, scheme). scheme is page|cursor|offset|link|none;
+    the paginate loop may record `start` when the envelope fallback took over."""
     if isinstance(payload, dict):
         for key in NEXT_KEYS:
             value = payload.get(key)
@@ -429,17 +574,7 @@ def detect_next(
             if next_url != url:
                 return next_url, "cursor"
 
-        total = None
-        for key in ("total", "totalFound", "totalCount", "count", "total_results"):
-            if isinstance(payload.get(key), (int, float)):
-                total = int(payload[key])
-                break
-        meta = payload.get("meta") or payload.get("pagination") or {}
-        if total is None and isinstance(meta, dict):
-            for key in ("total", "totalCount", "totalFound"):
-                if isinstance(meta.get(key), (int, float)):
-                    total = int(meta[key])
-                    break
+        total = _top_level_total(payload)
 
         q = dict(parse_qsl(urlsplit(url).query, keep_blank_values=True))
         page_param = "page" if "page" in q else ("pageNumber" if "pageNumber" in q else None)
@@ -504,6 +639,11 @@ def paginate(
 ) -> dict[str, Any]:
     """Follow pagination into a result dict.
 
+    `complete` means the crawl covered the board: it began at the first
+    page/row, hit no cap, and fetched at least the board's reported total when
+    one was visible. Anything less is `truncated`, because ingest uses
+    `complete` to expire roles the crawl did not see.
+
     `capture=True` marks a `paginate --input` run: the rows came from a single
     page a human saved, so the run can never prove the board is complete. It
     always records `complete: false` / `status: "captured"` (#39).
@@ -518,20 +658,37 @@ def paginate(
     current = url
     offset = 0
     page = 1
+    initial_start = _start_offset(current) if current else None
     if current:
         q = dict(parse_qsl(urlsplit(current).query, keep_blank_values=True))
         if q.get("page", "").isdigit():
             page = int(q["page"])
         if q.get("offset", "").isdigit():
             offset = int(q["offset"])
+    initial_page, initial_offset = page, offset
+    raw_seen = 0
+    reported_total: int | None = None
+    saw_board_total = False
+    start_mode = False
+    pending_start = False
+    # (base start-paged URL, next offset) captured before an invented
+    # page=/offset= is followed; used only if that page comes back wholly
+    # duplicated or empty (#69 review: don't hijack a working pager).
+    start_fallback: tuple[str, int] | None = None
     seen_urls: set[str] = set()
     seen_fps: set[str] = set()
     fetch_log: list[dict[str, Any]] = []
 
     while True:
         if pages >= max_pages:
-            truncated = True
-            complete = False
+            # Hitting the page cap exactly on a covered board is not
+            # truncation; the board's own total says there is no more.
+            if reported_total is not None and len(listings) >= reported_total:
+                complete = True
+                truncated = False
+            else:
+                truncated = True
+                complete = False
             break
         if current:
             if current in seen_urls:
@@ -553,6 +710,37 @@ def paginate(
             break
 
         raw_jobs = extract_job_list(payload)
+        raw_seen += len(raw_jobs)
+        total_candidates = [
+            total for total in (
+                envelope_total(payload, raw_jobs),
+                _top_level_total(payload),
+            ) if total is not None
+        ]
+        page_total = max(total_candidates) if total_candidates else None
+        if page_total is not None and page_total < len(raw_jobs):
+            # A count below the rows already served is not a board total
+            # (page size / facet count); do not let it lower the bar.
+            page_total = None
+        if page_total is not None:
+            # Keep the largest total seen: a later page that reports a smaller
+            # (page-scoped or stale) count must not lower the completeness bar.
+            reported_total = (
+                page_total if reported_total is None
+                else max(reported_total, page_total)
+            )
+            saw_board_total = True
+        # Remember the start-envelope next page before detect_next can
+        # invent page=/offset=; it is only used if that page turns out to be
+        # a duplicate or empty. A working page/offset pager keeps its URL.
+        start_at = _start_offset(current) if current else None
+        if start_at is not None and page_total is not None:
+            env_next = detect_next_envelope(
+                current, payload, raw_jobs, last_count=len(raw_jobs),
+            )
+            fallback_start = _start_offset(env_next) if env_next else None
+            if fallback_start is not None and fallback_start > start_at:
+                start_fallback = (current or "", fallback_start)
         if not raw_jobs and parsed_empty_board(payload):
             empty_board = True
         page_listings = []
@@ -569,28 +757,84 @@ def paginate(
                 continue
             seen_fps.add(fp)
             new_listings.append(item)
+        if pending_start and new_listings:
+            # The start fallback produced fresh rows: this board pages by
+            # `start`, so stop probing invented page=/offset= URLs.
+            start_mode = True
+            pending_start = False
         if page_listings and not new_listings:
             # Whole page was already seen — the "next" URL added nothing.
+            # If detect_next had invented page=/offset= on a start-paged
+            # board, try the remembered start envelope before calling it done.
+            if (start_fallback is not None
+                    and (reported_total is None
+                         or len(listings) < reported_total)):
+                base_url, next_start = start_fallback
+                fallback_url = _set_query(base_url, start=next_start)
+                if fallback_url not in seen_urls and fallback_url != current:
+                    start_fallback = None
+                    pending_start = True
+                    pages += 1  # the duplicate fetch happened; count it
+                    current = fallback_url
+                    payload = None
+                    scheme = "start"
+                    continue
             complete = True
             break
         listings.extend(new_listings)
         pages += 1
-        last_count = len(page_listings)
+        # Step by the rows the board served, not the normalized count: one
+        # unparseable row must not make an offset/page request re-read its
+        # neighbour. `page_listings` still drives the dedupe/empty-page guard.
+        last_count = len(raw_jobs)
         if len(listings) >= max_listings:
             listings = listings[:max_listings]
-            truncated = True
-            complete = False
+            # Hitting the cap is only truncation when the board's own total
+            # still says there is more (or no total is visible).
+            if reported_total is None or len(listings) < reported_total:
+                truncated = True
+                complete = False
             break
         if not current:
             complete = True
             break
-        next_url, found = detect_next(
-            current, payload, page=page, offset=offset,
-            last_count=last_count, page_size=page_size,
-            fetched=len(listings), scheme=scheme,
-        )
+        if start_mode and start_at is not None:
+            env_next = detect_next_envelope(
+                current, payload, raw_jobs, last_count=last_count,
+            )
+            next_url, found = env_next, ("start" if env_next else "none")
+        else:
+            next_url, found = detect_next(
+                current, payload, page=page, offset=offset,
+                last_count=last_count, page_size=page_size,
+                fetched=len(listings), scheme=scheme,
+            )
         if found != "none":
             scheme = found
+        if not next_url or next_url == current:
+            env_next = detect_next_envelope(
+                current, payload, raw_jobs, last_count=last_count,
+            )
+            if env_next and env_next != current:
+                # Its own scheme name: detect_next's offset branch keys on
+                # scheme == "offset" and would otherwise invent an offset=
+                # param on a later, larger page.
+                next_url, found = env_next, "start"
+                scheme = found
+                start_mode = True
+        if (last_count == 0 and start_fallback is not None
+                and (reported_total is None or len(listings) < reported_total)):
+            # An empty page after an invented page=/offset= can still be a
+            # start-paged board's real next page; try the envelope once.
+            base_url, next_start = start_fallback
+            fallback_url = _set_query(base_url, start=next_start)
+            if fallback_url not in seen_urls and fallback_url != current:
+                start_fallback = None
+                pending_start = True
+                current = fallback_url
+                payload = None
+                scheme = "start"
+                continue
         if not next_url or next_url == current or last_count == 0:
             complete = True
             break
@@ -601,11 +845,33 @@ def paginate(
         current = next_url
         payload = None
 
+    # A crawl that started mid-board, or staged fewer unique roles than the
+    # board says it has, cannot vouch for the whole board. Coverage is unique
+    # listings, not raw rows: a re-sorting board can serve duplicates while
+    # pushing unseen roles out of the window, and a row that normalization
+    # drops is not coverage either. `rowsFetched` stays diagnostic.
+    started_mid_board = (
+        initial_page > 1
+        or initial_offset > 0
+        or (initial_start is not None and initial_start > 0 and saw_board_total)
+    )
+    if complete and not truncated and (
+        started_mid_board
+        or (reported_total is not None and len(listings) < reported_total)
+    ):
+        truncated = True
+        complete = False
+    if scheme == "none" and saw_board_total and initial_start is not None:
+        # A one-page envelope board still paged by `start`; report the scheme.
+        scheme = "start"
+
     # Crawl state (#34/#39). `status` is additive: `complete`/`truncated` keep
     # their old meaning and stay the expiry rule; `status` is the readable,
     # machine-checked headline.
-    #   complete  — clean crawl, rows captured
-    #   truncated — page/listing cap hit with rows captured
+    #   complete  — clean crawl covering the board, rows captured
+    #   truncated — partial crawl: a cap was hit before the board total was
+    #               covered, it began mid-board, or it staged fewer unique
+    #               listings than the board reported
     #   empty     — clean 200 with a parsed, empty job list: every role closed
     #   blocked   — nothing parseable came back (unreadable body, no list key)
     #   captured  — `paginate --input`: a saved page, never the whole board
@@ -614,7 +880,9 @@ def paginate(
         pagination_complete = False
         status = "captured" if listings else "blocked"
     elif not listings and empty_board:
-        status = "empty"
+        # A parsed empty list only means "every role closed" when the crawl
+        # covered the board; a total the crawl never reached contradicts it.
+        status = "empty" if pagination_complete else "blocked"
     elif not listings:
         status = "blocked"
         pagination_complete = False
@@ -622,17 +890,25 @@ def paginate(
         status = "truncated"
     else:
         status = "complete"
+    pagination: dict[str, Any] = {
+        "pages": pages,
+        "complete": pagination_complete,
+        "truncated": truncated,
+        "scheme": scheme,
+        "maxPages": max_pages,
+        "status": status,
+    }
+    if reported_total is not None:
+        pagination["reportedTotal"] = reported_total
+    pagination["rowsFetched"] = raw_seen
+    if raw_seen > len(listings):
+        # Diagnostic only: normalization drops and cap overflow land here too,
+        # so this is not a trustworthy subtraction from reportedTotal.
+        pagination["deduped"] = raw_seen - len(listings)
     return {
         "listings": listings,
         "sourceUrl": source_url,
-        "pagination": {
-            "pages": pages,
-            "complete": pagination_complete,
-            "truncated": truncated,
-            "scheme": scheme,
-            "maxPages": max_pages,
-            "status": status,
-        },
+        "pagination": pagination,
         "fetchLog": fetch_log,
     }
 
@@ -656,6 +932,7 @@ def blocked_result(url: str, error: str, max_pages: int = DEFAULT_MAX_PAGES) -> 
             "scheme": "none",
             "maxPages": max_pages,
             "status": "blocked",
+            "rowsFetched": 0,
         },
         "fetchLog": [{
             "timestamp": _now(),

@@ -444,9 +444,14 @@ class PaginationTests(unittest.TestCase):
 
         board = json.loads((FIXTURES / "fat-board" / "jobs.json").read_text())
         cls.jobs = board["jobs"]
+        # The fixture has 38 raw rows, but three are copies of one posting
+        # (36 unique). A real board reports the unique count; the dedupe then
+        # does not look like missing coverage.
+        cls.total = 36
 
         class Handler(BaseHTTPRequestHandler):
             jobs = cls.jobs
+            total = cls.total
 
             def log_message(self, fmt, *args):
                 return
@@ -466,7 +471,7 @@ class PaginationTests(unittest.TestCase):
                 if parsed.path.endswith("/offset"):
                     offset = int((q.get("offset") or ["0"])[0])
                     chunk = self.jobs[offset:offset + limit]
-                    self._send({"jobs": chunk, "total": len(self.jobs)})
+                    self._send({"jobs": chunk, "total": self.total})
                     return
                 if parsed.path.endswith("/cursor"):
                     cursor = int((q.get("cursor") or ["0"])[0])
@@ -477,7 +482,7 @@ class PaginationTests(unittest.TestCase):
                 page = int((q.get("page") or ["1"])[0])
                 start = (page - 1) * limit
                 chunk = self.jobs[start:start + limit]
-                payload = {"jobs": chunk, "total": len(self.jobs)}
+                payload = {"jobs": chunk, "total": self.total}
                 if start + limit < len(self.jobs):
                     payload["next"] = f"/jobs?page={page + 1}&limit={limit}"
                 self._send(payload)
@@ -510,10 +515,16 @@ class PaginationTests(unittest.TestCase):
         self.assertFalse(result["pagination"]["truncated"])
         # Fixture holds 38 rows but 3 are the same Senior PM posting (36 unique).
         self.assertEqual(len(result["listings"]), 36)
+        # Coverage is unique listings, not raw rows: dedupe is not a short
+        # crawl when the board's total already counts unique postings.
+        self.assertEqual(result["pagination"]["reportedTotal"], 36)
+        self.assertEqual(result["pagination"]["rowsFetched"], 38)
+        self.assertEqual(result["pagination"]["deduped"], 2)
         quiet = write_pagination(triage, result, company="FatBoard")
         self.assertTrue((triage / "index" / "pagination.json").is_file())
         inv = (triage / "INVENTORY.md").read_text()
         self.assertIn("complete=true", inv)
+        self.assertIn("reportedTotal=36", inv)
         self.assertEqual(quiet["pages"], result["pagination"]["pages"])
 
     def test_max_pages_marks_incomplete(self):
@@ -611,6 +622,547 @@ class PaginationTests(unittest.TestCase):
         fps = [fingerprint(j) for j in result["listings"]]
         self.assertEqual(len(fps), len(set(fps)))
         self.assertEqual(len(result["listings"]), 60)
+
+
+class EnvelopeOffsetPaginationTests(unittest.TestCase):
+    """Eightfold-shaped boards (NVIDIA): rows and the total sit under `data`,
+    and the board pages by `start`, not `offset`/`page`. Upstream read one
+    page, found no total, saw no page param, and recorded `complete: true` at
+    10 of 2,725 — which the ingest expiry then trusted. The fallback runs after
+    detect_next (and replaces an invented `offset=` when the board only pages
+    by `start`), so every shape detect_next already handled is untouched; the
+    tests below pin both halves, plus the completeness rules."""
+
+    @staticmethod
+    def _rows(n, prefix="Eng"):
+        return [{"title": f"{prefix} {i}", "url": f"https://x.io/jobs/{i}", "location": "NY"} for i in range(n)]
+
+    @staticmethod
+    def _fetch(builder):
+        def fake_fetch(url):
+            import json as _json
+            from urllib.parse import parse_qsl, urlsplit
+            q = dict(parse_qsl(urlsplit(url).query))
+            body = builder(q)
+            return body, 200, _json.dumps(body).encode()
+        return fake_fetch
+
+    @classmethod
+    def _eightfold(cls, total, size):
+        positions = [
+            {"id": 893000000000 + i, "name": f"Engineer {i}", "location": "Santa Clara, CA",
+             "positionUrl": f"/careers/job/{893000000000 + i}"}
+            for i in range(total)
+        ]
+        return cls._fetch(lambda q: {"status": 200, "error": None, "data": {
+            "positions": positions[int(q.get("start", "0")):int(q.get("start", "0")) + size],
+            "count": total}})
+
+    def test_nested_total_and_start_param_are_followed(self):
+        from network_jobs.pagination import paginate
+        url = "https://jobs.example.com/api/pcsx/search?domain=example.com&query=&start=0"
+        result = paginate(url, fetch=self._eightfold(25, 10), max_pages=10)
+        pag = result["pagination"]
+        self.assertEqual(pag["pages"], 3)
+        self.assertEqual(pag["scheme"], "start")
+        self.assertTrue(pag["complete"])
+        self.assertEqual(pag["status"], "complete")
+        self.assertEqual(pag["reportedTotal"], 25)
+        self.assertEqual(pag["rowsFetched"], 25)
+        self.assertNotIn("deduped", pag)
+        self.assertEqual(len(result["listings"]), 25)
+        # positionUrl is a canonical page link, absolutized at the host root
+        self.assertEqual(result["listings"][0]["url"],
+                         "https://jobs.example.com/careers/job/893000000000")
+        self.assertEqual(result["fetchLog"][1]["url"],
+                         "https://jobs.example.com/api/pcsx/search?domain=example.com&query=&start=10")
+
+    def test_cap_on_envelope_board_is_truncated_not_complete(self):
+        from network_jobs.pagination import paginate
+        url = "https://jobs.example.com/api/pcsx/search?domain=example.com&query=&start=0"
+        result = paginate(url, fetch=self._eightfold(2725, 10), max_pages=2)
+        pag = result["pagination"]
+        self.assertFalse(pag["complete"])
+        self.assertTrue(pag["truncated"])
+        self.assertEqual(pag["status"], "truncated")
+        self.assertEqual(len(result["listings"]), 20)
+
+    def test_start_offset_bootstraps_from_the_url(self):
+        # A URL that starts at row 20 only sees the tail (5 of 25). It must
+        # never report `complete`: ingest would expire the 20 roles it never
+        # fetched. The scheme is still start, and reportedTotal shows coverage.
+        from network_jobs.pagination import paginate
+        url = "https://jobs.example.com/api/pcsx/search?start=20"
+        result = paginate(url, fetch=self._eightfold(25, 10), max_pages=10)
+        pag = result["pagination"]
+        self.assertEqual(len(result["listings"]), 5)
+        self.assertEqual(pag["pages"], 1)
+        self.assertEqual(pag["scheme"], "start")
+        self.assertEqual(pag["reportedTotal"], 25)
+        self.assertEqual(pag["rowsFetched"], 5)
+        self.assertFalse(pag["complete"])
+        self.assertTrue(pag["truncated"])
+        self.assertEqual(pag["status"], "truncated")
+
+    def test_top_level_envelope_pages_by_start(self):
+        # Same shape with the rows and count at the top level: detect_next sees
+        # the count and invents `offset=`. The crawl probes it once, sees the
+        # duplicate page, then locks onto start= and finishes.
+        from network_jobs.pagination import paginate
+        rows = [{"id": i, "name": f"Engineer {i}", "location": "NY",
+                 "positionUrl": f"/job/{i}"} for i in range(25)]
+
+        def build(q):
+            start = int(q.get("start", "0"))
+            return {"positions": rows[start:start + 10], "count": 25}
+
+        result = paginate("https://x.io/api/search?start=0", fetch=self._fetch(build), max_pages=10)
+        pag = result["pagination"]
+        self.assertEqual(len(result["listings"]), 25)
+        self.assertEqual(pag["pages"], 4)
+        self.assertEqual(pag["scheme"], "start")
+        self.assertTrue(pag["complete"])
+        self.assertEqual(pag["reportedTotal"], 25)
+        self.assertEqual([e["url"] for e in result["fetchLog"]], [
+            "https://x.io/api/search?start=0",
+            "https://x.io/api/search?start=0&offset=10",
+            "https://x.io/api/search?start=10",
+            "https://x.io/api/search?start=20",
+        ])
+
+    def test_envelope_short_of_reported_total_is_truncated(self):
+        # The board says 100 but stops serving rows after 20. "No next page"
+        # is not evidence the other 80 roles closed.
+        from network_jobs.pagination import paginate
+        rows = self._rows(20)
+
+        def build(q):
+            page = int(q.get("page", "1"))
+            return {"jobs": rows[(page - 1) * 10:page * 10], "total": 100}
+
+        result = paginate("https://x.io/api/jobs?page=1", fetch=self._fetch(build),
+                          max_pages=10, page_size=10)
+        pag = result["pagination"]
+        self.assertEqual(len(result["listings"]), 20)
+        self.assertEqual(pag["reportedTotal"], 100)
+        self.assertEqual(pag["rowsFetched"], 20)
+        self.assertFalse(pag["complete"])
+        self.assertTrue(pag["truncated"])
+        self.assertEqual(pag["status"], "truncated")
+
+    def test_complete_crawl_with_duplicate_rows_stays_complete(self):
+        # The board reports 36 unique postings and serves 38 raw rows (two
+        # repeats). Unique coverage meets the total, so the crawl is complete.
+        from network_jobs.pagination import paginate
+        base = self._rows(36)
+        rows = base + [dict(base[0]), dict(base[1])]
+
+        def build(q):
+            page = int(q.get("page", "1"))
+            return {"jobs": rows[(page - 1) * 10:page * 10], "total": 36}
+
+        result = paginate("https://x.io/api/jobs?page=1", fetch=self._fetch(build),
+                          max_pages=10, page_size=10)
+        pag = result["pagination"]
+        self.assertEqual(len(result["listings"]), 36)
+        self.assertEqual(pag["reportedTotal"], 36)
+        self.assertEqual(pag["rowsFetched"], 38)
+        self.assertEqual(pag["deduped"], 2)
+        self.assertTrue(pag["complete"])
+        self.assertFalse(pag["truncated"])
+
+    def test_duplicate_rows_short_of_reported_total_are_truncated(self):
+        # Same raw rows, but the board says 38. Unique coverage is 36, so the
+        # two roles that duplicates displaced must not look covered (#69
+        # review: raw rows are not coverage).
+        from network_jobs.pagination import paginate
+        base = self._rows(36)
+        rows = base + [dict(base[0]), dict(base[1])]
+
+        def build(q):
+            page = int(q.get("page", "1"))
+            return {"jobs": rows[(page - 1) * 10:page * 10], "total": 38}
+
+        result = paginate("https://x.io/api/jobs?page=1", fetch=self._fetch(build),
+                          max_pages=10, page_size=10)
+        pag = result["pagination"]
+        self.assertEqual(len(result["listings"]), 36)
+        self.assertEqual(pag["reportedTotal"], 38)
+        self.assertFalse(pag["complete"])
+        self.assertTrue(pag["truncated"])
+        self.assertEqual(pag["status"], "truncated")
+
+    def test_first_page_at_page_size_follows_start_not_page(self):
+        # detect_next's generic full-page fallback can invent page=2 before the
+        # envelope is consulted. The crawl probes it once, sees the duplicate
+        # page, then locks onto start=.
+        from network_jobs.pagination import paginate
+        rows = [{"id": i, "name": f"Engineer {i}", "location": "NY",
+                 "positionUrl": f"/job/{i}"} for i in range(100)]
+
+        def build(q):
+            start = int(q.get("start", "0"))
+            return {"data": {"positions": rows[start:start + 50], "count": 100}}
+
+        result = paginate("https://x.io/api/search?start=0",
+                          fetch=self._fetch(build), max_pages=10)
+        pag = result["pagination"]
+        self.assertEqual(len(result["listings"]), 100)
+        self.assertEqual(pag["pages"], 3)
+        self.assertEqual(pag["scheme"], "start")
+        self.assertTrue(pag["complete"])
+        self.assertEqual([e["url"] for e in result["fetchLog"]], [
+            "https://x.io/api/search?start=0",
+            "https://x.io/api/search?start=0&page=2",
+            "https://x.io/api/search?start=50",
+        ])
+
+    def test_page_paged_board_with_start_seed_is_not_hijacked(self):
+        # A page= board with a leftover start=0 seed must keep its page pager;
+        # the old override threw away page=2 and returned half the board.
+        from network_jobs.pagination import paginate
+        rows = [{"id": i, "name": f"Engineer {i}", "location": "NY",
+                 "positionUrl": f"/job/{i}"} for i in range(100)]
+
+        def build(q):
+            if "page" in q:
+                page = int(q["page"])
+                start = (page - 1) * 50
+            else:
+                start = int(q.get("start", "0"))
+            return {"data": {"positions": rows[start:start + 50], "count": 100}}
+
+        result = paginate("https://x.io/api/search?start=0",
+                          fetch=self._fetch(build), max_pages=10)
+        pag = result["pagination"]
+        self.assertEqual(len(result["listings"]), 100)
+        self.assertTrue(pag["complete"])
+        self.assertEqual(pag["scheme"], "page")
+        self.assertNotIn("start=50", "".join(e["url"] for e in result["fetchLog"]))
+
+    def test_offset_board_with_start_zero_is_not_hijacked(self):
+        # offset=0 is a decoy, not proof the board pages by start.
+        from network_jobs.pagination import paginate
+        rows = [{"id": i, "name": f"Engineer {i}", "location": "NY",
+                 "positionUrl": f"/job/{i}"} for i in range(100)]
+
+        def build(q):
+            offset = int(q.get("offset", "0"))
+            return {"data": {"positions": rows[offset:offset + 50], "count": 100}}
+
+        result = paginate("https://x.io/api/search?start=0&offset=0",
+                          fetch=self._fetch(build), max_pages=10)
+        pag = result["pagination"]
+        self.assertEqual(len(result["listings"]), 100)
+        self.assertTrue(pag["complete"])
+        self.assertEqual(pag["scheme"], "offset")
+        self.assertNotIn("start=50", "".join(e["url"] for e in result["fetchLog"]))
+
+    def test_zero_page_decoys_do_not_disable_start(self):
+        from network_jobs.pagination import paginate
+        rows = [{"id": i, "name": f"Engineer {i}", "location": "NY",
+                 "positionUrl": f"/job/{i}"} for i in range(20)]
+
+        def build(q):
+            start = int(q.get("start", "0"))
+            return {"data": {"positions": rows[start:start + 10], "count": 20}}
+
+        for query in ("pageNumber=0", "offset=00"):
+            with self.subTest(query=query):
+                result = paginate(f"https://x.io/api/search?start=0&{query}",
+                                  fetch=self._fetch(build), max_pages=10)
+                self.assertEqual(len(result["listings"]), 20)
+                self.assertTrue(result["pagination"]["complete"])
+
+    def test_explicit_total_beats_bare_count_and_accepts_strings(self):
+        # A bare `count` is often the page size; an explicit total_results must
+        # win. Digit-string totals are accepted too.
+        from network_jobs.pagination import paginate
+        rows = [{"id": i, "name": f"Engineer {i}", "location": "NY",
+                 "positionUrl": f"/job/{i}"} for i in range(25)]
+
+        def build(q):
+            start = int(q.get("start", "0"))
+            return {"data": {"positions": rows[start:start + 10],
+                             "count": 10, "total_results": 25}}
+
+        result = paginate("https://x.io/api/search?start=0",
+                          fetch=self._fetch(build), max_pages=10)
+        self.assertEqual(len(result["listings"]), 25)
+        self.assertEqual(result["pagination"]["reportedTotal"], 25)
+        self.assertTrue(result["pagination"]["complete"])
+
+        def string_build(q):
+            start = int(q.get("start", "0"))
+            return {"data": {"positions": rows[start:start + 10],
+                             "count": "25"}}
+
+        string_result = paginate("https://x.io/api/search?start=0",
+                                 fetch=self._fetch(string_build), max_pages=10)
+        self.assertEqual(len(string_result["listings"]), 25)
+        self.assertEqual(string_result["pagination"]["reportedTotal"], 25)
+        self.assertTrue(string_result["pagination"]["complete"])
+
+    def test_explicit_meta_total_beats_string_count(self):
+        # A digit-string bare count must not shadow a real meta total.
+        from network_jobs.pagination import paginate
+        rows = [{"id": i, "name": f"Engineer {i}", "location": "NY",
+                 "positionUrl": f"/job/{i}"} for i in range(100)]
+
+        def build(q):
+            start = int(q.get("start", "0"))
+            return {"jobs": rows[start:start + 10],
+                    "count": "10", "meta": {"total": 100}}
+
+        result = paginate("https://x.io/api/search?start=0",
+                          fetch=self._fetch(build), max_pages=20)
+        pag = result["pagination"]
+        self.assertEqual(len(result["listings"]), 100)
+        self.assertEqual(pag["reportedTotal"], 100)
+        self.assertTrue(pag["complete"])
+
+    def test_envelope_count_does_not_shadow_larger_top_level_total(self):
+        # data.count=50 is a page-sized count; the top-level total=100 must
+        # win, or the crawl stops halfway and calls it complete.
+        from network_jobs.pagination import paginate
+        rows = [{"id": i, "name": f"Engineer {i}", "location": "NY",
+                 "positionUrl": f"/job/{i}"} for i in range(100)]
+
+        def build(q):
+            start = int(q.get("start", "0"))
+            return {"data": {"positions": rows[start:start + 10],
+                             "count": "50"}, "total": 100}
+
+        result = paginate("https://x.io/api/search?start=0",
+                          fetch=self._fetch(build), max_pages=20)
+        pag = result["pagination"]
+        self.assertEqual(len(result["listings"]), 100)
+        self.assertEqual(pag["reportedTotal"], 100)
+        self.assertTrue(pag["complete"])
+
+    def test_superscript_count_is_ignored_and_total_results_wins(self):
+        # "²".isdigit() is true but int() raises; explicit totals still work.
+        from network_jobs.pagination import paginate
+        rows = [{"id": i, "name": f"Engineer {i}", "location": "NY",
+                 "positionUrl": f"/job/{i}"} for i in range(25)]
+
+        def build(q):
+            start = int(q.get("start", "0"))
+            return {"jobs": rows[start:start + 10],
+                    "count": "²", "total_results": 25}
+
+        result = paginate("https://x.io/api/search?start=0",
+                          fetch=self._fetch(build), max_pages=10)
+        self.assertEqual(len(result["listings"]), 25)
+        self.assertEqual(result["pagination"]["reportedTotal"], 25)
+        self.assertTrue(result["pagination"]["complete"])
+
+    def test_total_smaller_than_page_is_ignored(self):
+        from network_jobs.pagination import paginate
+        rows = self._rows(10)
+        fetch = self._fetch(lambda q: {"jobs": rows, "count": 3})
+        result = paginate("https://x.io/api/jobs", fetch=fetch, max_pages=5)
+        self.assertEqual(len(result["listings"]), 10)
+        self.assertNotIn("reportedTotal", result["pagination"])
+
+    def test_max_pages_exact_covered_board_is_complete(self):
+        # 3 x 50 = 150 with total 150 is complete, not a cap truncation.
+        from network_jobs.pagination import paginate
+        rows = [{"id": i, "name": f"Engineer {i}", "location": "NY",
+                 "positionUrl": f"/job/{i}"} for i in range(150)]
+
+        def build(q):
+            page = int(q.get("page", "1"))
+            return {"jobs": rows[(page - 1) * 50:page * 50], "total": 150}
+
+        result = paginate("https://x.io/api/jobs?page=1",
+                          fetch=self._fetch(build), max_pages=3, page_size=50)
+        pag = result["pagination"]
+        self.assertEqual(len(result["listings"]), 150)
+        self.assertTrue(pag["complete"])
+        self.assertFalse(pag["truncated"])
+
+    def test_a_later_smaller_total_does_not_lower_the_bar(self):
+        # Page 1 says 25, page 2 says 15 after 20 unique rows. The larger
+        # first total must stand, so the crawl stays truncated.
+        from network_jobs.pagination import paginate
+        rows = [{"id": i, "name": f"Engineer {i}", "location": "NY",
+                 "positionUrl": f"/job/{i}"} for i in range(20)]
+
+        def build(q):
+            start = int(q.get("start", "0"))
+            total = 25 if start == 0 else 15
+            return {"data": {"positions": rows[start:start + 10], "count": total}}
+
+        result = paginate("https://x.io/api/search?start=0",
+                          fetch=self._fetch(build), max_pages=10)
+        pag = result["pagination"]
+        self.assertEqual(len(result["listings"]), 20)
+        self.assertEqual(pag["reportedTotal"], 25)
+        self.assertFalse(pag["complete"])
+        self.assertTrue(pag["truncated"])
+
+    def test_zero_offset_does_not_disable_start(self):
+        # A start-paged URL with a zero offset decoy must still follow start.
+        from network_jobs.pagination import paginate
+        rows = [{"id": i, "name": f"Engineer {i}", "location": "NY",
+                 "positionUrl": f"/job/{i}"} for i in range(20)]
+
+        def build(q):
+            start = int(q.get("start", "0"))
+            return {"data": {"positions": rows[start:start + 10], "count": 20}}
+
+        result = paginate("https://x.io/api/search?start=0&offset=0",
+                          fetch=self._fetch(build), max_pages=10)
+        self.assertEqual(len(result["listings"]), 20)
+        self.assertEqual(result["pagination"]["scheme"], "start")
+        self.assertTrue(result["pagination"]["complete"])
+
+    def test_exact_max_listings_is_not_truncated_when_board_is_covered(self):
+        # A board with exactly max_listings rows is complete, not capped.
+        from network_jobs.pagination import paginate
+        rows = self._rows(20)
+        fetch = self._fetch(lambda q: {"jobs": rows, "total": 20})
+        result = paginate("https://x.io/api/jobs", fetch=fetch,
+                          max_pages=5, max_listings=20, page_size=20)
+        pag = result["pagination"]
+        self.assertEqual(len(result["listings"]), 20)
+        self.assertTrue(pag["complete"])
+        self.assertFalse(pag["truncated"])
+
+    def test_mid_board_page_entry_is_not_complete(self):
+        # No total to compare against; the page=2 entry itself is the proof
+        # that page one was never read.
+        from network_jobs.pagination import paginate
+        rows = self._rows(30)
+
+        def build(q):
+            page = int(q.get("page", "1"))
+            return {"jobs": rows[(page - 1) * 10:page * 10]}
+
+        result = paginate("https://x.io/api/jobs?page=2", fetch=self._fetch(build),
+                          max_pages=10, page_size=10)
+        pag = result["pagination"]
+        self.assertEqual(len(result["listings"]), 20)
+        self.assertFalse(pag["complete"])
+        self.assertTrue(pag["truncated"])
+        self.assertEqual(pag["status"], "truncated")
+
+    # --- shapes detect_next already handled must come out exactly as before ---
+
+    def test_unrelated_nested_count_does_not_switch_a_page_board_to_offset(self):
+        from network_jobs.pagination import paginate
+        rows = self._rows(100)
+        fetch = self._fetch(lambda q: {"jobs": rows[(int(q.get("page", "1")) - 1) * 50:int(q.get("page", "1")) * 50],
+                                       "data": {"count": 1000, "facets": {}}})
+        result = paginate("https://x.io/api/jobs", fetch=fetch, max_pages=10, page_size=50)
+        self.assertEqual(len(result["listings"]), 100)
+        self.assertTrue(result["pagination"]["complete"])
+        self.assertEqual(result["pagination"]["scheme"], "page")
+
+    def test_digit_valued_filter_beside_page_is_not_an_offset(self):
+        from network_jobs.pagination import paginate
+        rows = self._rows(20)
+        fetch = self._fetch(lambda q: {"jobs": rows[(int(q.get("page", "1")) - 1) * 10:int(q.get("page", "1")) * 10],
+                                       "total": 20})
+        result = paginate("https://x.io/api/jobs?from=0&page=1", fetch=fetch, max_pages=10, page_size=10)
+        self.assertEqual(len(result["listings"]), 20)
+        self.assertTrue(result["pagination"]["complete"])
+        self.assertNotIn("from=10", result["fetchLog"][1]["url"])
+
+    def test_digit_valued_filter_without_page_still_pages_by_number(self):
+        # `from=2020` is a year filter on a page-counting board with no page
+        # param in the URL and no total: detect_next's full-page fallback must
+        # keep winning. (With a top-level total upstream itself takes the offset
+        # branch and stops at 50; that is pre-existing and not changed here.)
+        from network_jobs.pagination import paginate
+        rows = self._rows(100)
+        fetch = self._fetch(lambda q: {"jobs": rows[(int(q.get("page", "1")) - 1) * 50:int(q.get("page", "1")) * 50]})
+        result = paginate("https://x.io/api/jobs?from=2020", fetch=fetch, max_pages=10, page_size=50)
+        self.assertEqual(len(result["listings"]), 100)
+        self.assertTrue(result["pagination"]["complete"])
+        self.assertNotIn("from=2070", result["fetchLog"][1]["url"])
+
+    def test_start_filter_on_a_page_board_is_not_promoted(self):
+        # Same board with `start=2020`: rows live at the top level, so there is
+        # no envelope count beside them and the fallback declines.
+        from network_jobs.pagination import paginate
+        rows = self._rows(100)
+        fetch = self._fetch(lambda q: {"jobs": rows[(int(q.get("page", "1")) - 1) * 50:int(q.get("page", "1")) * 50],
+                                       "data": {"count": 999}})
+        result = paginate("https://x.io/api/jobs?start=2020", fetch=fetch, max_pages=10, page_size=50)
+        self.assertEqual(len(result["listings"]), 100)
+        self.assertTrue(result["pagination"]["complete"])
+        self.assertNotIn("start=2070", "".join(e["url"] for e in result["fetchLog"]))
+
+    def test_first_link_only_then_page_and_total_keeps_counting(self):
+        from network_jobs.pagination import paginate
+        rows = self._rows(100)
+
+        def build(q):
+            page = int(q.get("page", "1"))
+            body = {"jobs": rows[(page - 1) * 10:page * 10], "total": 100}
+            if page == 1:
+                body["next"] = "https://x.io/api/jobs?page=2"
+            return body
+        result = paginate("https://x.io/api/jobs", fetch=self._fetch(build), max_pages=20, page_size=10)
+        self.assertEqual(len(result["listings"]), 100)
+        self.assertTrue(result["pagination"]["complete"])
+
+    def test_link_paged_board_with_unrelated_nested_count(self):
+        from network_jobs.pagination import paginate
+        rows = self._rows(150)
+
+        def build(q):
+            page = int(q.get("page", "1"))
+            body = {"jobs": rows[(page - 1) * 10:page * 10], "data": {"count": 1000, "positions": []}}
+            if page < 15:
+                body["next"] = f"https://x.io/api/jobs?page={page + 1}"
+            return body
+        result = paginate("https://x.io/api/jobs?page=1", fetch=self._fetch(build), max_pages=15, page_size=50)
+        self.assertEqual(len(result["listings"]), 150)
+        self.assertTrue(result["pagination"]["complete"])
+        self.assertFalse(result["pagination"]["truncated"])
+
+    def test_start_strategy_survives_a_larger_later_page(self):
+        # Second-reader counterexample: page 1 has 10 rows, later pages 50.
+        # The fallback's scheme must not let detect_next invent offset= once
+        # a page reaches page_size; the crawl stays on start= to the end.
+        from network_jobs.pagination import paginate
+        rows = [{"id": i, "name": f"Engineer {i}", "location": "NY", "positionUrl": f"/job/{i}"} for i in range(100)]
+
+        def build(q):
+            start = int(q.get("start", "0"))
+            size = 10 if start == 0 else 50
+            return {"data": {"positions": rows[start:start + size], "count": 100}}
+        result = paginate("https://x.io/api/search?start=0", fetch=self._fetch(build), max_pages=15)
+        self.assertEqual(len(result["listings"]), 100)
+        self.assertTrue(result["pagination"]["complete"])
+        self.assertEqual(result["pagination"]["scheme"], "start")
+        urls = [e["url"] for e in result["fetchLog"]]
+        self.assertEqual(urls, ["https://x.io/api/search?start=0", "https://x.io/api/search?start=10",
+                                "https://x.io/api/search?start=60"])
+
+    def test_envelope_count_must_sit_beside_the_extracted_rows(self):
+        from network_jobs.pagination import detect_next_envelope, extract_job_list
+        url = "https://x.io/api/jobs?start=0"
+        beside = {"status": 200, "data": {"positions": self._rows(10), "count": 25}}
+        rows = extract_job_list(beside)
+        self.assertEqual(detect_next_envelope(url, beside, rows, last_count=10),
+                         "https://x.io/api/jobs?start=10")
+        top = {"positions": self._rows(10), "count": 25}
+        self.assertEqual(detect_next_envelope(url, top, extract_job_list(top), last_count=10),
+                         "https://x.io/api/jobs?start=10")
+        elsewhere = {"jobs": self._rows(10), "data": {"positions": self._rows(3, "Other"), "count": 999}}
+        rows = extract_job_list(elsewhere)
+        self.assertIsNone(detect_next_envelope(url, elsewhere, rows, last_count=10))
+        two_hops = {"data": {"payload": {"positions": self._rows(10), "count": 123}}}
+        rows = extract_job_list(two_hops)
+        self.assertIsNone(detect_next_envelope(url, two_hops, rows, last_count=10))
+        self.assertIsNone(detect_next_envelope("https://x.io/api/jobs?start=2026-01-01", beside,
+                                               extract_job_list(beside), last_count=10))
+        self.assertIsNone(detect_next_envelope("https://x.io/api/jobs?start=20", beside,
+                                               extract_job_list(beside), last_count=5))
 
 
 class FingerprintExpiryTests(unittest.TestCase):
@@ -775,6 +1327,45 @@ class FingerprintExpiryTests(unittest.TestCase):
                     pagination_complete=True, pagination_status=status,
                     expected_total=9, force_expire=True)
                 self.assertEqual(info["expired"], 0)
+
+    def test_expiry_refused_for_truncated_status(self):
+        # A truncated crawl is partial. Even if a model wrongly passes
+        # --pagination-complete, expiry must stay closed; force_expire is the
+        # explicit override (unlike blocked/captured).
+        from network_jobs.corpus import merge_jobs
+
+        existing = [
+            self._job(externalId="1", url="https://fatboard.example/jobs/1"),
+            self._job(title="Staff Engineer", externalId="2",
+                      url="https://fatboard.example/jobs/2"),
+        ]
+        incoming = [self._job(externalId="1", url="https://fatboard.example/jobs/1")]
+        merged, info = merge_jobs(
+            existing, incoming, expire_company="FatBoard",
+            pagination_complete=True, pagination_status="truncated",
+            expected_total=1)
+        self.assertTrue(info["expirySkipped"])
+        self.assertEqual(info["expired"], 0)
+        self.assertIn("truncated", info["expiryReason"])
+        statuses = {j["externalId"]: j.get("status", "open") for j in merged}
+        self.assertEqual(statuses["2"], "open")
+
+        merged, info = merge_jobs(
+            existing, incoming, expire_company="FatBoard",
+            pagination_complete=True, pagination_status="truncated",
+            expected_total=1, force_expire=True)
+        self.assertFalse(info["expirySkipped"])
+        self.assertEqual(info["expired"], 1)
+
+        # The normal truncated path passes --pagination-incomplete; it is a
+        # silent no-op, not a "pass --force-expire" warning (force cannot
+        # open a complete=false crawl).
+        merged, info = merge_jobs(
+            existing, incoming, expire_company="FatBoard",
+            pagination_complete=False, pagination_status="truncated",
+            expected_total=1)
+        self.assertFalse(info["expirySkipped"])
+        self.assertEqual(info["expired"], 0)
 
     def test_expiry_skipped_for_empty_when_company_had_open_roles(self):
         # An empty crawl with N>0 prior open roles must not wipe the company
@@ -3809,6 +4400,23 @@ class PaginationNormalizeTests(unittest.TestCase):
         self.assertEqual(job["externalId"], "10586855")
         self.assertNotIn("job_path", job)
         self.assertNotIn("url_next_step", job)
+
+    def test_relative_position_url_anchors_at_host_root(self):
+        # Eightfold's positionUrl is normally root-relative. A slashless
+        # variant must not resolve under /api/pcsx/ on the source URL.
+        from network_jobs.pagination import normalize_listing
+
+        raw = {
+            "id": 893398340997,
+            "name": "Senior Software QA Engineer",
+            "location": "Bengaluru, India",
+            "positionUrl": "careers/job/893398340997",
+        }
+        job = normalize_listing(
+            raw, "https://jobs.example.com/api/pcsx/search?domain=example.com&start=0")
+        assert job is not None
+        self.assertEqual(
+            job["url"], "https://jobs.example.com/careers/job/893398340997")
 
     def test_requisition_id_does_not_beat_posting_id(self):
         # #48: Greenhouse reuses one requisition_id across distinct postings.

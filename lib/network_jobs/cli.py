@@ -1268,7 +1268,7 @@ def build_parser() -> argparse.ArgumentParser:
     rf.add_argument("--json", action="store_true", help="print a machine-readable summary")
     rf.set_defaults(func=cmd_refresh)
 
-    g = sub.add_parser("paginate", help="follow page/cursor/offset into listings.json")
+    g = sub.add_parser("paginate", help="follow page/cursor/offset/start into listings.json")
     g.add_argument("--url")
     g.add_argument("--input", help="local JSON file instead of fetching")
     g.add_argument("--triage-dir", required=True)
@@ -1284,7 +1284,7 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--pagination-complete", action="store_true")
     b.add_argument("--pagination-incomplete", action="store_true")
     b.add_argument("--pagination-status", default=None,
-                   help="status from index/pagination.json: blocked/captured never expire")
+                   help="status from index/pagination.json: blocked/captured never expire; truncated unless --force-expire")
     b.add_argument("--expect-count", type=int, default=None,
                    help="board listing count: skip expiry when the batch is a strict subset (filtered ingest)")
     b.add_argument("--force-expire", action="store_true",

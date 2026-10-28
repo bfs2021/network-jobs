@@ -169,7 +169,7 @@ Skills self-describe for routing. `network-jobs routing` prints an optional snip
 - **Shared data:** one `~/.network-jobs/` for every agent on the machine.
 - **Symlink installs:** one suite copy; `update` re-points agent skill links.
 - **Prefs-aware discovery/search:** after extract, `match-prefs.py` writes `index/matches.json` (confirm matches by default; ingest all / department slice still available). Search runs `rank-jobs.py` and reports `Showing K of N` instead of dumping shards.
-- **Crawl budget:** listing-set hash + `lastCrawl` on the company; skip unchanged boards; paginate with page/browser caps; ingest is a fingerprint delta. Expiry still requires `pagination.complete`.
+- **Crawl budget:** listing-set hash + `lastCrawl` on the company; skip unchanged boards; paginate with page/browser caps; ingest is a fingerprint delta. Expiry requires `pagination.complete` and a status that is not `truncated`/`blocked`/`captured` (`truncated` can be forced).
 
 ## Fixtures
 
